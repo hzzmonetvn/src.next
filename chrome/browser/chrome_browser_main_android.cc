@@ -6,17 +6,23 @@
 
 #include <memory>
 
+#include "base/android/application_status_listener.h"
 #include "base/android/jni_android.h"
+#include "base/android/scudo_features.h"
+#include "base/android/scudo_purge_coordinator.h"
+#include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/path_service.h"
 #include "base/task/current_thread.h"
 #include "base/task/thread_pool.h"
 #include "base/trace_event/trace_event.h"
+#include "chrome/browser/android/metrics/android_atoms_logger.h"
 #include "chrome/browser/android/mojo/chrome_interface_registrar_android.h"
 #include "chrome/browser/android/preferences/clipboard_android.h"
 #include "chrome/browser/android/seccomp_support_detector.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/data_saver/data_saver.h"
+#include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/webauthn/android/cable_module_android.h"
 #include "components/crash/content/browser/child_exit_observer_android.h"
 #include "components/crash/content/browser/child_process_crash_observer_android.h"
@@ -24,7 +30,7 @@
 #include "content/public/browser/android/compositor.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/common/main_function_params.h"
-#include "device/fido/features.h"
+#include "device/fido/public/features.h"
 #include "net/base/network_change_notifier.h"
 #include "ui/base/resource/resource_bundle.h"
 #include "ui/base/resource/resource_bundle_android.h"
@@ -38,8 +44,7 @@ ChromeBrowserMainPartsAndroid::ChromeBrowserMainPartsAndroid(
     StartupData* startup_data)
     : ChromeBrowserMainParts(is_integration_test, startup_data) {}
 
-ChromeBrowserMainPartsAndroid::~ChromeBrowserMainPartsAndroid() {
-}
+ChromeBrowserMainPartsAndroid::~ChromeBrowserMainPartsAndroid() = default;
 
 int ChromeBrowserMainPartsAndroid::PreCreateThreads() {
   TRACE_EVENT0("startup", "ChromeBrowserMainPartsAndroid::PreCreateThreads");
@@ -76,7 +81,7 @@ void ChromeBrowserMainPartsAndroid::PostProfileInit(Profile* profile,
   // Android backup, so that we create a new backup if they change.
   base::android::ScopedJavaGlobalRef<jobject> watcher;
   watcher.Reset(android::Java_ChromeBackupWatcher_Constructor(
-      base::android::AttachCurrentThread()));
+      base::android::AttachCurrentThread(), profile));
   backup_watcher_runner_.ReplaceClosure(
       base::BindOnce(&android::Java_ChromeBackupWatcher_destroy,
                      base::android::AttachCurrentThread(), watcher));
@@ -101,13 +106,57 @@ int ChromeBrowserMainPartsAndroid::PreEarlyInitialization() {
 void ChromeBrowserMainPartsAndroid::PostBrowserStart() {
   ChromeBrowserMainParts::PostBrowserStart();
 
+  // Initializes the logger that forwards allowed UMA histograms to Android
+  // Statsd (Westworld) as atoms.
+  // TODO: crbug.com/512252292 - Add link to the readme doc for more background
+  // and context after it's created.
+  chrome::android::westworld::AndroidAtomsLogger::Initialize();
+
   base::ThreadPool::PostDelayedTask(
       FROM_HERE, {base::MayBlock(), base::TaskPriority::BEST_EFFORT},
       base::BindOnce(&ReportSeccompSupport), base::Minutes(1));
 
   RegisterChromeJavaMojoInterfaces();
+
+  scudo_purge_coordinator_ =
+      base::android::ScudoPurgeCoordinator::CreateIfEnabled();
+
+  if (scudo_purge_coordinator_) {
+    scudo_purge_coordinator_->Start();
+
+    // `base::Unretained(this)` is safe because `app_status_listener_` is owned
+    // by `this` and unregisters the listener upon destruction, ensuring the
+    // callback cannot be invoked after `this` is destroyed.
+    app_status_listener_ = base::android::ApplicationStatusListener::New(
+        base::BindRepeating(
+            &ChromeBrowserMainPartsAndroid::OnApplicationStateChange,
+            base::Unretained(this)));
+
+    OnApplicationStateChange(
+        base::android::ApplicationStatusListener::GetState());
+  }
 }
 
 void ChromeBrowserMainPartsAndroid::ShowMissingLocaleMessageBox() {
   NOTREACHED();
 }
+
+void ChromeBrowserMainPartsAndroid::OnApplicationStateChange(
+    base::android::ApplicationState state) {
+  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  CHECK(scudo_purge_coordinator_);
+  switch (state) {
+    case base::android::APPLICATION_STATE_HAS_RUNNING_ACTIVITIES:
+    case base::android::APPLICATION_STATE_HAS_PAUSED_ACTIVITIES:
+      scudo_purge_coordinator_->OnForegrounded();
+      break;
+    case base::android::APPLICATION_STATE_HAS_STOPPED_ACTIVITIES:
+    case base::android::APPLICATION_STATE_HAS_DESTROYED_ACTIVITIES:
+      scudo_purge_coordinator_->OnBackgrounded();
+      break;
+    case base::android::APPLICATION_STATE_UNKNOWN:
+      break;
+  }
+}
+
+DEFINE_JNI(ChromeBackupWatcher)

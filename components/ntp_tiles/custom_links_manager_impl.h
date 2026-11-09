@@ -14,6 +14,7 @@
 #include "base/scoped_observation.h"
 #include "components/history/core/browser/history_service.h"
 #include "components/history/core/browser/history_service_observer.h"
+#include "components/ntp_tiles/constants.h"
 #include "components/ntp_tiles/custom_links_manager.h"
 #include "components/ntp_tiles/custom_links_store.h"
 #include "components/ntp_tiles/most_visited_sites.h"
@@ -28,14 +29,27 @@ class PrefRegistrySyncable;
 
 namespace ntp_tiles {
 
+class CustomLinksManagerImplTest;
+
 // Non-test implementation of the CustomLinksManager interface.
 class CustomLinksManagerImpl : public CustomLinksManager,
                                public history::HistoryServiceObserver {
  public:
+  struct Options {
+    raw_ptr<PrefService> prefs = nullptr;
+    // Can be nullptr in unittests.
+    raw_ptr<history::HistoryService> history_service = nullptr;
+    size_t max_links = ntp_tiles::kMaxNumCustomLinks;
+    bool enable_ai_mode_tile = false;
+    // Selects the pref keys the links are persisted to and synced under.
+    // Embedders must set this to match the surface they serve; the default
+    // only exists so that tests and desktop-only callers do not have to spell
+    // it out.
+    CustomLinksScope scope = CustomLinksScope::kDesktop;
+  };
+
   // Restores the previous state of |current_links_| from prefs.
-  CustomLinksManagerImpl(PrefService* prefs,
-                         // Can be nullptr in unittests.
-                         history::HistoryService* history_service);
+  explicit CustomLinksManagerImpl(const Options& options);
 
   CustomLinksManagerImpl(const CustomLinksManagerImpl&) = delete;
   CustomLinksManagerImpl& operator=(const CustomLinksManagerImpl&) = delete;
@@ -48,7 +62,11 @@ class CustomLinksManagerImpl : public CustomLinksManager,
   bool IsInitialized() const override;
 
   const std::vector<Link>& GetLinks() const override;
+  size_t GetMaxLinks() const override;
 
+  bool AddLinkTo(const GURL& url,
+                 const std::u16string& title,
+                 size_t pos) override;
   bool AddLink(const GURL& url, const std::u16string& title) override;
   bool UpdateLink(const GURL& url,
                   const GURL& new_url,
@@ -65,7 +83,17 @@ class CustomLinksManagerImpl : public CustomLinksManager,
       user_prefs::PrefRegistrySyncable* user_prefs);
 
  private:
+  friend class CustomLinksManagerImplTest;
+
   void ClearLinks();
+
+  // Inserts the virtual AI Mode link into `links` if enabled and not deleted.
+  void InsertAiModeLinkIfNeeded(std::vector<Link>& links);
+
+  // Returns the index of the virtual AI Mode link, or -1 if unpinned/deleted.
+  int GetAiModeTileIndex() const;
+  // Sets the index of the virtual AI Mode link. Use -1 to indicate deleted.
+  void SetAiModeTileIndex(int index);
 
   // Stores the current list to the profile's preferences. Does not notify
   // |OnPreferenceChanged|.
@@ -74,9 +102,6 @@ class CustomLinksManagerImpl : public CustomLinksManager,
   // Checks during instantiation to remove custom shortcut links
   // created through preinstalled apps.
   void RemoveCustomLinksForPreinstalledApps();
-
-  // Returns an iterator into |custom_links_|.
-  std::vector<Link>::iterator FindLinkWithUrl(const GURL& url);
 
   // history::HistoryServiceObserver implementation.
   // Deletes any Most Visited links whose URL is in |deletion_info|. Clears
@@ -91,7 +116,10 @@ class CustomLinksManagerImpl : public CustomLinksManager,
   // and notifies |closure_list_|.
   void OnPreferenceChanged();
 
+  const char* const custom_links_initialized_pref_;
   const raw_ptr<PrefService> prefs_;
+  const size_t max_links_;
+  const bool enable_ai_mode_tile_;
   CustomLinksStore store_;
   std::vector<Link> current_links_;
   // The state of the current list of links before the last action was
@@ -107,8 +135,7 @@ class CustomLinksManagerImpl : public CustomLinksManager,
                           history::HistoryServiceObserver>
       history_service_observation_{this};
 
-  // Observer for Chrome sync changes to |prefs::kCustomLinksList| and
-  // |prefs::kCustomLinksInitialized|.
+  // Observer for Chrome sync changes to custom links prefs.
   PrefChangeRegistrar pref_change_registrar_;
   // Used to ignore notifications from |pref_change_registrar_| that we trigger
   // ourselves when updating the preferences.

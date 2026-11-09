@@ -7,8 +7,9 @@
 
 #include <vector>
 
+#include "base/functional/callback_helpers.h"
 #include "base/memory/raw_ptr.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "content/public/browser/download_manager_delegate.h"
 #include "content/public/browser/save_page_type.h"
 #include "ui/shell_dialogs/select_file_dialog.h"
@@ -40,13 +41,13 @@ class SavePackageFilePicker : public ui::SelectFileDialog::Listener {
   void FileSelectionCanceled() override;
 
   bool ShouldSaveAsOnlyHTML(content::WebContents* web_contents) const;
-  bool ShouldSaveAsMHTML() const;
+  bool ShouldSaveAsMHTMLByDefault() const;
 
   // Used to look up the renderer process for this request to get the context.
-  int render_process_id_;
+  const int render_process_id_;
 
   // Whether the web page can be saved as a complete HTML file.
-  bool can_save_as_complete_;
+  const bool can_save_as_complete_;
 
   // TODO(crbug.com/40280922): `download_prefs_` points to
   // `ChromeDownloadManagerDelegate::download_prefs_`.
@@ -57,6 +58,10 @@ class SavePackageFilePicker : public ui::SelectFileDialog::Listener {
   content::SavePackagePathPickedCallback callback_;
 
   std::vector<content::SavePageType> save_types_;
+
+  // Prohibits the associated WebContents from entering fullscreen while the
+  // native save file dialog is open.
+  base::ScopedClosureRunner fullscreen_block_;
 
   // For managing select file dialogs.
   scoped_refptr<ui::SelectFileDialog> select_file_dialog_;

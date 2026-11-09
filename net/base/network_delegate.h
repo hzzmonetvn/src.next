@@ -23,8 +23,6 @@
 #include "net/cookies/cookie_setting_override.h"
 #include "net/cookies/cookie_util.h"
 #include "net/cookies/site_for_cookies.h"
-#include "net/first_party_sets/first_party_set_metadata.h"
-#include "net/first_party_sets/first_party_sets_cache_filter.h"
 #include "net/proxy_resolution/proxy_retry_info.h"
 #include "net/url_request/redirect_info.h"
 
@@ -35,6 +33,8 @@ class Origin;
 }
 
 namespace net {
+
+class SSLInfo;
 
 // NOTE: Layering violations!
 // We decided to accept these violations (depending
@@ -75,7 +75,8 @@ class NET_EXPORT NetworkDelegate {
       const HttpResponseHeaders* original_response_headers,
       scoped_refptr<HttpResponseHeaders>* override_response_headers,
       const IPEndPoint& remote_endpoint,
-      std::optional<GURL>* preserve_fragment_on_redirect_url);
+      std::optional<GURL>* preserve_fragment_on_redirect_url,
+      const std::optional<net::SSLInfo>& ssl_info);
   void NotifyBeforeRedirect(URLRequest* request,
                             const GURL& new_location);
   void NotifyBeforeRetry(URLRequest* request);
@@ -85,23 +86,17 @@ class NET_EXPORT NetworkDelegate {
   void NotifyPACScriptError(int line_number, const std::u16string& error);
   bool AnnotateAndMoveUserBlockedCookies(
       const URLRequest& request,
-      const net::FirstPartySetMetadata& first_party_set_metadata,
       CookieAccessResultList& maybe_included_cookies,
       CookieAccessResultList& excluded_cookies);
   bool CanSetCookie(const URLRequest& request,
                     const net::CanonicalCookie& cookie,
                     CookieOptions* options,
-                    const net::FirstPartySetMetadata& first_party_set_metadata,
                     CookieInclusionStatus* inclusion_status);
+  bool ShouldForceIgnoreSiteForCookies(const URLRequest& request);
 
   std::optional<cookie_util::StorageAccessStatus> GetStorageAccessStatus(
       const URLRequest& request,
       base::optional_ref<const RedirectInfo> redirect_info) const;
-
-  // Returns true if the `Sec-Fetch-Storage-Access` request header flow is
-  // enabled in the given context.
-  bool IsStorageAccessHeaderEnabled(const url::Origin* top_frame_origin,
-                                    const GURL& url) const;
 
   // PrivacySetting is kStateDisallowed iff the given |url| has to be
   // requested over connection that is not tracked by the server.
@@ -234,7 +229,8 @@ class NET_EXPORT NetworkDelegate {
       const HttpResponseHeaders* original_response_headers,
       scoped_refptr<HttpResponseHeaders>* override_response_headers,
       const IPEndPoint& remote_endpoint,
-      std::optional<GURL>* preserve_fragment_on_redirect_url) = 0;
+      std::optional<GURL>* preserve_fragment_on_redirect_url,
+      const std::optional<net::SSLInfo>& ssl_info) = 0;
 
   // Called right after a redirect response code was received. |new_location| is
   // only valid for the duration of the call.
@@ -271,7 +267,6 @@ class NET_EXPORT NetworkDelegate {
   // otherwise.
   virtual bool OnAnnotateAndMoveUserBlockedCookies(
       const URLRequest& request,
-      const net::FirstPartySetMetadata& first_party_set_metadata,
       net::CookieAccessResultList& maybe_included_cookies,
       net::CookieAccessResultList& excluded_cookies) = 0;
 
@@ -286,8 +281,13 @@ class NET_EXPORT NetworkDelegate {
       const URLRequest& request,
       const CanonicalCookie& cookie,
       CookieOptions* options,
-      const net::FirstPartySetMetadata& first_party_set_metadata,
       CookieInclusionStatus* inclusion_status) = 0;
+
+  // Returns true if the site for cookies should be ignored for the request.
+  // This is typically used for requests initiated by extensions, where the
+  // request's initiator is granted cross-origin access, allowing it to
+  // send cookies to the target URL.
+  virtual bool OnShouldForceIgnoreSiteForCookies(const URLRequest& request) = 0;
 
   virtual PrivacySetting OnForcePrivacyMode(
       const URLRequest& request) const = 0;
@@ -319,10 +319,6 @@ class NET_EXPORT NetworkDelegate {
   OnGetStorageAccessStatus(
       const URLRequest& request,
       base::optional_ref<const RedirectInfo> redirect_info) const = 0;
-
-  virtual bool OnIsStorageAccessHeaderEnabled(
-      const url::Origin* top_frame_origin,
-      const GURL& url) const = 0;
 };
 
 }  // namespace net

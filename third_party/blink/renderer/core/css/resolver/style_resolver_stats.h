@@ -40,8 +40,6 @@
 namespace blink {
 
 class StyleResolverStats {
-  USING_FAST_MALLOC(StyleResolverStats);
-
  public:
   StyleResolverStats() { Reset(); }
 
@@ -60,6 +58,7 @@ class StyleResolverStats {
   unsigned elements_styled;
   unsigned pseudo_elements_styled;
   unsigned base_styles_used;
+  unsigned svg_presentation_attribute_styles_used;
   unsigned independent_inherited_styles_propagated;
   unsigned custom_properties_applied;
 };

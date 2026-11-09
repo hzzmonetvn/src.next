@@ -8,10 +8,6 @@
 #include "build/build_config.h"
 #include "chrome/common/search/instant_types.h"
 
-#if BUILDFLAG(IS_ANDROID)
-#error "Instant is only used on desktop";
-#endif
-
 struct InstantMostVisitedInfo;
 
 // InstantServiceObserver defines the observer interface for InstantService.
@@ -24,7 +20,7 @@ class InstantServiceObserver {
   virtual void MostVisitedInfoChanged(const InstantMostVisitedInfo&);
 
  protected:
-  virtual ~InstantServiceObserver() {}
+  virtual ~InstantServiceObserver() = default;
 };
 
 #endif  // CHROME_BROWSER_SEARCH_INSTANT_SERVICE_OBSERVER_H_

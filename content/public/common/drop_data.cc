@@ -4,12 +4,24 @@
 
 #include "content/public/common/drop_data.h"
 
+#include "base/pickle.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "net/base/filename_util.h"
 #include "net/base/mime_util.h"
 
 namespace content {
+
+DownloadUrlMetadata::DownloadUrlMetadata() = default;
+DownloadUrlMetadata::~DownloadUrlMetadata() = default;
+
+DownloadUrlMetadata::DownloadUrlMetadata(const DownloadUrlMetadata&) = default;
+DownloadUrlMetadata& DownloadUrlMetadata::operator=(
+    const DownloadUrlMetadata&) = default;
+
+DownloadUrlMetadata::DownloadUrlMetadata(DownloadUrlMetadata&&) = default;
+DownloadUrlMetadata& DownloadUrlMetadata::operator=(DownloadUrlMetadata&&) =
+    default;
 
 // static
 DropData::Metadata DropData::Metadata::CreateForMimeType(
@@ -23,19 +35,19 @@ DropData::Metadata DropData::Metadata::CreateForMimeType(
 
 // static
 DropData::Metadata DropData::Metadata::CreateForFilePath(
-    const base::FilePath& filename) {
+    const base::FilePath& filename,
+    const base::FilePath& display_name) {
   Metadata metadata;
   metadata.kind = Kind::FILENAME;
   metadata.filename = filename;
+  metadata.display_name = display_name;
   return metadata;
 }
 
 // static
-DropData::Metadata DropData::Metadata::CreateForFileSystemUrl(
-    const GURL& file_system_url) {
+DropData::Metadata DropData::Metadata::CreateForFileSystemFile() {
   Metadata metadata;
   metadata.kind = Kind::FILESYSTEMFILE;
-  metadata.file_system_url = file_system_url;
   return metadata;
 }
 

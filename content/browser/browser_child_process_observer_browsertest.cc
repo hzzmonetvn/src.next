@@ -5,17 +5,19 @@
 #include "content/public/browser/browser_child_process_observer.h"
 
 #include "base/functional/bind.h"
+#include "base/process/process.h"
 #include "base/run_loop.h"
 #include "build/build_config.h"
 #include "content/browser/browser_child_process_host_impl.h"
 #include "content/browser/child_process_host_impl.h"
-#include "content/browser/utility_process_host.h"
+#include "content/browser/sandboxed_process_launcher_delegate.h"
+#include "content/browser/service_host/utility_process_host.h"
 #include "content/public/browser/browser_child_process_host.h"
 #include "content/public/browser/browser_child_process_host_delegate.h"
 #include "content/public/browser/child_process_data.h"
+#include "content/public/common/child_process_id.h"
 #include "content/public/common/content_switches.h"
 #include "content/public/common/process_type.h"
-#include "content/public/common/sandboxed_process_launcher_delegate.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/content_browser_test.h"
 #include "content/public/test/test_service.mojom.h"
@@ -63,7 +65,7 @@ std::ostream& operator<<(std::ostream& os, Notification notification) {
 }
 
 // Returns true if a child process whose ID is |child_id| is still alive.
-bool IsHostAlive(int child_id) {
+bool IsHostAlive(ChildProcessId child_id) {
   return BrowserChildProcessHost::FromID(child_id) != nullptr;
 }
 
@@ -78,7 +80,7 @@ class BrowserChildProcessNotificationObserver
       base::RepeatingCallback<void(Notification notification)>;
 
   BrowserChildProcessNotificationObserver(
-      int child_id,
+      ChildProcessId child_id,
       OnNotificationCallback on_notification_callback)
       : child_id_(child_id),
         on_notification_callback_(std::move(on_notification_callback)) {
@@ -92,7 +94,11 @@ class BrowserChildProcessNotificationObserver
  protected:
   // BrowserChildProcessObserver:
   void BrowserChildProcessLaunchedAndConnected(
-      const ChildProcessData& data) override {
+      const ChildProcessData& data,
+      const base::Process& process) override {
+    if (data.GetChildProcessId() == child_id_) {
+      EXPECT_TRUE(process.IsValid());
+    }
     OnNotification(data, Notification::kLaunchedAndConnected);
   }
   void BrowserChildProcessHostDisconnected(
@@ -121,13 +127,14 @@ class BrowserChildProcessNotificationObserver
   }
 
   void OnNotification(const ChildProcessData& data, Notification notification) {
-    if (data.id == child_id_)
+    if (data.GetChildProcessId() == child_id_) {
       on_notification_callback_.Run(notification);
+    }
   }
 
  private:
   // Every notification coming for a child with a different ID will be ignored.
-  int child_id_;
+  ChildProcessId child_id_;
 
   // The callback to invoke every time a method of the observer is called.
   OnNotificationCallback on_notification_callback_;
@@ -137,7 +144,8 @@ class BrowserChildProcessNotificationObserver
 // is sent for a child process whose ID matches |child_id|.
 class WaitForNotificationObserver {
  public:
-  WaitForNotificationObserver(int child_id, Notification notification)
+  WaitForNotificationObserver(ChildProcessId child_id,
+                              Notification notification)
       : inner_observer_(
             child_id,
             base::BindRepeating(&WaitForNotificationObserver::OnNotification,
@@ -188,7 +196,7 @@ class TestSandboxedProcessLauncherDelegate
 };
 
 // A test-specific type of process host. Self-owned.
-class TestProcessHost : public BrowserChildProcessHostDelegate {
+class TestProcessHost final : public BrowserChildProcessHostDelegate {
  public:
   static base::WeakPtr<TestProcessHost> Create() {
     auto* instance = new TestProcessHost();
@@ -196,14 +204,13 @@ class TestProcessHost : public BrowserChildProcessHostDelegate {
   }
 
   TestProcessHost()
-      : process_(BrowserChildProcessHost::Create(
-            PROCESS_TYPE_UTILITY,
-            this,
-            ChildProcessHost::IpcMode::kNormal)) {}
+      : process_(
+            std::make_unique<BrowserChildProcessHostImpl>(PROCESS_TYPE_UTILITY,
+                                                          this)) {}
   ~TestProcessHost() override = default;
 
   // Returns the ID of the child process.
-  int GetId() { return process_->GetData().id; }
+  ChildProcessId GetID() { return process_->GetData().GetChildProcessId(); }
 
   // Binds to the test service on the child process and returns the bound
   // remote.
@@ -246,10 +253,9 @@ class TestProcessHost : public BrowserChildProcessHostDelegate {
     process_->SetName(u"Test utility process");
 
     auto command_line = GetChildCommandLine();
-    bool terminate_on_shutdown = true;
 
     process_->Launch(std::move(sandboxed_process_launcher_delegate),
-                     std::move(command_line), terminate_on_shutdown);
+                     std::move(command_line));
 
     test_service_ = BindTestService();
   }
@@ -274,7 +280,7 @@ class TestProcessHost : public BrowserChildProcessHostDelegate {
  private:
   sandbox::mojom::Sandbox sandbox_type_ = sandbox::mojom::Sandbox::kUtility;
 
-  std::unique_ptr<BrowserChildProcessHost> process_;
+  std::unique_ptr<BrowserChildProcessHostImpl> process_;
 
   mojo::Remote<mojom::TestService> test_service_;
 
@@ -285,7 +291,7 @@ class TestProcessHost : public BrowserChildProcessHostDelegate {
 // child process.
 class TestBrowserChildProcessObserver {
  public:
-  explicit TestBrowserChildProcessObserver(int child_id)
+  explicit TestBrowserChildProcessObserver(ChildProcessId child_id)
       : inner_observer_(child_id,
                         base::BindRepeating(
                             &TestBrowserChildProcessObserver::OnNotification,
@@ -321,7 +327,7 @@ class BrowserChildProcessObserverBrowserTest : public ContentBrowserTest {};
 IN_PROC_BROWSER_TEST_F(BrowserChildProcessObserverBrowserTest,
                        MAYBE_LaunchAndForceShutdown) {
   base::WeakPtr<TestProcessHost> host = TestProcessHost::Create();
-  int child_id = host->GetId();
+  ChildProcessId child_id = host->GetID();
 
   TestBrowserChildProcessObserver observer(child_id);
 
@@ -361,7 +367,7 @@ IN_PROC_BROWSER_TEST_F(BrowserChildProcessObserverBrowserTest,
 IN_PROC_BROWSER_TEST_F(BrowserChildProcessObserverBrowserTest,
                        LaunchAndDelete) {
   base::WeakPtr<TestProcessHost> host = TestProcessHost::Create();
-  int child_id = host->GetId();
+  ChildProcessId child_id = host->GetID();
 
   TestBrowserChildProcessObserver observer(child_id);
 
@@ -400,7 +406,7 @@ IN_PROC_BROWSER_TEST_F(BrowserChildProcessObserverBrowserTest,
 IN_PROC_BROWSER_TEST_F(BrowserChildProcessObserverBrowserTest,
                        MAYBE_LaunchAndDisconnect) {
   base::WeakPtr<TestProcessHost> host = TestProcessHost::Create();
-  int child_id = host->GetId();
+  ChildProcessId child_id = host->GetID();
 
   TestBrowserChildProcessObserver observer(child_id);
 
@@ -438,7 +444,8 @@ IN_PROC_BROWSER_TEST_F(BrowserChildProcessObserverBrowserTest,
 // Tests that launching and then causing a crash the host results in a crashed
 // notification.
 // TODO(crbug.com/40868150): Times out on Android tests.
-#if BUILDFLAG(IS_ANDROID)
+// TODO(crbug.com/440535492): Flaky on Win dbg. Re-enable this test.
+#if BUILDFLAG(IS_ANDROID) || (BUILDFLAG(IS_WIN) && !defined(NDEBUG))
 #define MAYBE_LaunchAndCrash DISABLED_LaunchAndCrash
 #else
 #define MAYBE_LaunchAndCrash LaunchAndCrash
@@ -446,7 +453,7 @@ IN_PROC_BROWSER_TEST_F(BrowserChildProcessObserverBrowserTest,
 IN_PROC_BROWSER_TEST_F(BrowserChildProcessObserverBrowserTest,
                        MAYBE_LaunchAndCrash) {
   base::WeakPtr<TestProcessHost> host = TestProcessHost::Create();
-  int child_id = host->GetId();
+  ChildProcessId child_id = host->GetID();
 
   TestBrowserChildProcessObserver observer(child_id);
 
@@ -492,7 +499,7 @@ IN_PROC_BROWSER_TEST_F(BrowserChildProcessObserverBrowserTest,
 #if !BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_MAC)
 IN_PROC_BROWSER_TEST_F(BrowserChildProcessObserverBrowserTest, LaunchFailed) {
   base::WeakPtr<TestProcessHost> host = TestProcessHost::Create();
-  int child_id = host->GetId();
+  ChildProcessId child_id = host->GetID();
 
 #if BUILDFLAG(IS_WIN)
   // The Windows sandbox does not like the child process being a different
@@ -557,7 +564,7 @@ class TestPreSpawnTargetFailureBrowserChildProcessNotificationObserver
 IN_PROC_BROWSER_TEST_F(BrowserChildProcessObserverBrowserTest,
                        LaunchPreSpawnFailed) {
   base::WeakPtr<TestProcessHost> host = TestProcessHost::Create();
-  int child_id = host->GetId();
+  ChildProcessId child_id = host->GetID();
 
   TestBrowserChildProcessObserver observer(child_id);
 

@@ -5,9 +5,9 @@
 #include "chrome/browser/search/instant_service.h"
 
 #include <stddef.h>
+
 #include <string>
 
-#include "base/files/file_util.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/memory/ptr_util.h"
@@ -25,39 +25,41 @@
 #include "chrome/browser/search/instant_service_observer.h"
 #include "chrome/browser/search/most_visited_iframe_source.h"
 #include "chrome/browser/search/search.h"
-#include "chrome/browser/themes/theme_properties.h"
-#include "chrome/browser/themes/theme_service.h"
-#include "chrome/browser/themes/theme_service_factory.h"
 #include "chrome/browser/ui/webui/favicon_source.h"
-#include "chrome/browser/ui/webui/theme_source.h"
-#include "chrome/common/chrome_paths.h"
-#include "chrome/common/pref_names.h"
-#include "chrome/common/search/search.mojom.h"
-#include "chrome/common/url_constants.h"
-#include "chrome/grit/theme_resources.h"
 #include "components/favicon_base/favicon_url_parser.h"
 #include "components/ntp_tiles/constants.h"
+#include "components/ntp_tiles/tile_type.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/pref_service.h"
 #include "components/search/ntp_features.h"
-#include "components/search/search_provider_observer.h"
 #include "components/sync_preferences/pref_service_syncable.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/url_data_source.h"
-#include "extensions/browser/extension_registry.h"
-#include "extensions/common/extension.h"
+#include "extensions/buildflags/buildflags.h"
 #include "mojo/public/cpp/bindings/associated_remote.h"
 #include "ui/gfx/color_palette.h"
 #include "ui/gfx/color_utils.h"
+
+#if !BUILDFLAG(IS_ANDROID)
+#include "chrome/browser/themes/theme_properties.h"
+#include "chrome/browser/themes/theme_service.h"
+#include "chrome/browser/themes/theme_service_factory.h"
+#include "chrome/browser/ui/webui/theme_source.h"
+#include "chrome/grit/theme_resources.h"
+#endif
+
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+#include "extensions/browser/extension_registry.h"
+#include "extensions/common/extension.h"
+#endif
 
 InstantService::InstantService(Profile* profile)
     : profile_(profile),
       most_visited_info_(std::make_unique<InstantMostVisitedInfo>()),
       pref_service_(profile_->GetPrefs()),
-      native_theme_(ui::NativeTheme::GetInstanceForNativeUi()),
       background_updated_timestamp_(base::TimeTicks::Now()) {
   // The initialization below depends on a typical set of browser threads. Skip
   // it if we are running in a unit test without the full suite.
@@ -66,11 +68,14 @@ InstantService::InstantService(Profile* profile)
 
   most_visited_sites_ = ChromeMostVisitedSitesFactory::NewForProfile(profile_);
   if (most_visited_sites_) {
-    most_visited_sites_->EnableCustomLinks(false);
+    most_visited_sites_->EnableTileTypes(
+        ntp_tiles::MostVisitedSites::EnableTileTypesOptions().with_top_sites(
+            true));
     most_visited_sites_->AddMostVisitedURLsObserver(
         this, ntp_tiles::kMaxNumMostVisited);
   }
 
+#if !BUILDFLAG(IS_ANDROID)
   // Listen for theme installation.
   ThemeServiceFactory::GetForProfile(profile_)->AddObserver(this);
 
@@ -80,6 +85,7 @@ InstantService::InstantService(Profile* profile)
   // used and then the following can be removed.
   content::URLDataSource::Add(profile_,
                               std::make_unique<ThemeSource>(profile_));
+#endif
 
   // Set up the data sources that Instant uses on the NTP.
   content::URLDataSource::Add(
@@ -88,13 +94,13 @@ InstantService::InstantService(Profile* profile)
   content::URLDataSource::Add(profile_,
                               std::make_unique<MostVisitedIframeSource>());
 
-  theme_observation_.Observe(native_theme_.get());
+  theme_observation_.Observe(ui::NativeTheme::GetInstanceForNativeUi());
 }
 
 InstantService::~InstantService() = default;
 
 void InstantService::AddInstantProcess(content::RenderProcessHost* host) {
-  process_ids_.insert(host->GetID());
+  process_ids_.insert(host->GetDeprecatedID());
   // The same process may be added for multiple WebContents. Only observe once.
   if (!host_observation_.IsObservingSource(host)) {
     host_observation_.AddObservation(host);
@@ -119,10 +125,12 @@ void InstantService::OnNewTabPageOpened() {
   }
 }
 
+#if !BUILDFLAG(IS_ANDROID)
 void InstantService::OnThemeChanged() {
   theme_ = nullptr;
   UpdateNtpTheme();
 }
+#endif
 
 void InstantService::DeleteMostVisitedItem(const GURL& url) {
   if (most_visited_sites_) {
@@ -158,12 +166,6 @@ NtpTheme* InstantService::GetInitializedNtpTheme() {
   return theme_.get();
 }
 
-void InstantService::SetNativeThemeForTesting(ui::NativeTheme* theme) {
-  theme_observation_.Reset();
-  native_theme_ = theme;
-  theme_observation_.Observe(native_theme_.get());
-}
-
 void InstantService::Shutdown() {
   process_ids_.clear();
 
@@ -171,20 +173,21 @@ void InstantService::Shutdown() {
     most_visited_sites_.reset();
   }
 
+#if !BUILDFLAG(IS_ANDROID)
   ThemeServiceFactory::GetForProfile(profile_)->RemoveObserver(this);
+#endif
 }
 
 void InstantService::RenderProcessHostDestroyed(
     content::RenderProcessHost* host) {
   Profile* renderer_profile = static_cast<Profile*>(host->GetBrowserContext());
   if (profile_ == renderer_profile) {
-    process_ids_.erase(host->GetID());
+    process_ids_.erase(host->GetDeprecatedID());
     host_observation_.RemoveObservation(host);
   }
 }
 
 void InstantService::OnNativeThemeUpdated(ui::NativeTheme* observed_theme) {
-  DCHECK_EQ(observed_theme, native_theme_);
   // Force the theme information to rebuild so the correct using_dark_colors
   // value is sent to the renderer.
   BuildNtpTheme();
@@ -192,6 +195,7 @@ void InstantService::OnNativeThemeUpdated(ui::NativeTheme* observed_theme) {
 }
 
 void InstantService::OnURLsAvailable(
+    bool is_user_triggered,
     const std::map<ntp_tiles::SectionType, ntp_tiles::NTPTilesVector>&
         sections) {
   DCHECK(most_visited_sites_);
@@ -226,12 +230,14 @@ void InstantService::BuildNtpTheme() {
   // Get theme information from theme service.
   theme_ = std::make_unique<NtpTheme>();
 
+#if !BUILDFLAG(IS_ANDROID)
   // Get if the current theme is the default theme.
   ThemeService* theme_service = ThemeServiceFactory::GetForProfile(profile_);
   theme_->using_default_theme = theme_service->UsingDefaultTheme();
 
   SetNtpElementsNtpTheme();
 
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
   if (theme_service->UsingExtensionTheme()) {
     const extensions::Extension* extension =
         extensions::ExtensionRegistry::Get(profile_)
@@ -286,6 +292,10 @@ void InstantService::BuildNtpTheme() {
       }
     }
   }
+#endif
+#else
+  theme_->using_default_theme = true;
+#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
 // static
@@ -308,9 +318,13 @@ bool InstantService::ShouldServiceRequest(
 }
 
 void InstantService::SetNtpElementsNtpTheme() {
-  NtpTheme* theme = GetInitializedNtpTheme();
+  // Always make sure `theme_` is built, since UpdateNtpTheme() notifies
+  // observers right after this, even on platforms without a ThemeService.
+  GetInitializedNtpTheme();
+#if !BUILDFLAG(IS_ANDROID)
   const ui::ThemeProvider& theme_provider =
       ThemeService::GetThemeProviderForProfile(profile_);
-  theme->logo_alternate = theme_provider.GetDisplayProperty(
-                              ThemeProperties::NTP_LOGO_ALTERNATE) == 1;
+  theme_->logo_alternate = theme_provider.GetDisplayProperty(
+                               ThemeProperties::NTP_LOGO_ALTERNATE) == 1;
+#endif
 }

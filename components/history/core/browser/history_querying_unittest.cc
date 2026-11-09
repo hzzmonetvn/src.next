@@ -2,15 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/40285824): Remove this and convert code to safer constructs.
-#pragma allow_unsafe_buffers
-#endif
-
 #include <stddef.h>
 
+#include <array>
 #include <memory>
+#include <string>
 
+#include "base/containers/span.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
@@ -20,12 +18,16 @@
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/cancelable_task_tracker.h"
 #include "base/test/bind.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/test/task_environment.h"
 #include "base/time/time.h"
+#include "components/history/core/browser/features.h"
 #include "components/history/core/browser/history_database_params.h"
 #include "components/history/core/browser/history_service.h"
 #include "components/history/core/test/test_history_database.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "url/gurl.h"
 
 // Tests the history service for querying functionality.
 
@@ -38,7 +40,8 @@ struct TestEntry {
   const char* title;
   const int days_ago;
   base::Time time;  // Filled by SetUp.
-} test_entries[] = {
+};
+auto test_entries = std::to_array<TestEntry>({
     // This one is visited super long ago so it will be in a different database
     // from the next appearance of it at the end.
     {"http://example.com/", "Other", 180},
@@ -69,7 +72,7 @@ struct TestEntry {
     {"http://evil.test/example", "Host Evil domain", 18},
     {"http://evil.com/example.test", "Host Evil path", 19},
     {"https://random.test/", "Host random example.test", 20},
-};
+});
 
 // Returns true if the nth result in the given results set matches. It will
 // return false on a non-match or if there aren't enough results.
@@ -119,15 +122,14 @@ class HistoryQueryTest : public testing::Test {
   // Defined here so code can be shared for the text search and the non-text
   // seach versions.
   void TestPaging(const std::string& query_text,
-                  const int* expected_results,
-                  int results_length) {
+                  base::span<const int> expected_results) {
     ASSERT_TRUE(history_.get());
 
     QueryOptions options;
     QueryResults results;
 
     options.max_count = 1;
-    for (int i = 0; i < results_length; i++) {
+    for (size_t i = 0; i < expected_results.size(); i++) {
       SCOPED_TRACE(testing::Message() << "i = " << i);
       QueryHistory(query_text, options, &results);
       ASSERT_EQ(1U, results.size());
@@ -140,7 +142,7 @@ class HistoryQueryTest : public testing::Test {
     // Try with a max_count > 1.
     options.max_count = 2;
     options.end_time = base::Time();
-    for (int i = 0; i < results_length / 2; i++) {
+    for (size_t i = 0; i < expected_results.size() / 2; i++) {
       SCOPED_TRACE(testing::Message() << "i = " << i);
       QueryHistory(query_text, options, &results);
       ASSERT_EQ(2U, results.size());
@@ -184,7 +186,8 @@ class HistoryQueryTest : public testing::Test {
 
     history_->AddPage(url, entry.time, context_id, nav_entry_id_++, GURL(),
                       history::RedirectList(), ui::PAGE_TRANSITION_LINK,
-                      history::SOURCE_BROWSED, false);
+                      history::SOURCE_BROWSED,
+                      VisitResponseCodeCategory::kNot404, false);
     history_->SetPageTitle(url, base::UTF8ToUTF16(entry.title));
   }
 
@@ -195,10 +198,7 @@ class HistoryQueryTest : public testing::Test {
     ASSERT_TRUE(base::CreateDirectory(history_dir_));
 
     history_ = std::make_unique<HistoryService>();
-    if (!history_->Init(TestHistoryDatabaseParamsForPath(history_dir_))) {
-      history_.reset();  // Tests should notice this NULL ptr & fail.
-      return;
-    }
+    history_->Init(TestHistoryDatabaseParamsForPath(history_dir_));
 
     // Fill the test data.
     base_ = base::Time::Now().LocalMidnight();
@@ -391,34 +391,6 @@ TEST_F(HistoryQueryTest, TextSearchPrefix) {
   EXPECT_TRUE(NthResultIs(results, 1, 3));
 }
 
-TEST_F(HistoryQueryTest, HostSearch) {
-  ASSERT_TRUE(history_.get());
-
-  QueryOptions options;
-  QueryResults results;
-
-  // Query all normal search to make sure all entries appear.
-  options.host_only = false;
-  QueryHistory("example.test", options, &results);
-  EXPECT_EQ(7U, results.size());
-  EXPECT_TRUE(NthResultIs(results, 0, 8));
-  EXPECT_TRUE(NthResultIs(results, 1, 9));
-  EXPECT_TRUE(NthResultIs(results, 2, 10));
-  EXPECT_TRUE(NthResultIs(results, 3, 11));
-  EXPECT_TRUE(NthResultIs(results, 4, 12));
-  EXPECT_TRUE(NthResultIs(results, 5, 13));
-  EXPECT_TRUE(NthResultIs(results, 6, 14));
-
-  // Query with host_only = true to make sure only the host entries show up.
-  options.host_only = true;
-  QueryHistory("example.test", options, &results);
-  EXPECT_EQ(4U, results.size());
-  EXPECT_TRUE(NthResultIs(results, 0, 8));
-  EXPECT_TRUE(NthResultIs(results, 1, 9));
-  EXPECT_TRUE(NthResultIs(results, 2, 10));
-  EXPECT_TRUE(NthResultIs(results, 3, 11));
-}
-
 // Tests max_count feature for text search queries.
 TEST_F(HistoryQueryTest, TextSearchCount) {
   ASSERT_TRUE(history_.get());
@@ -456,12 +428,16 @@ TEST_F(HistoryQueryTest, TextSearchIDN) {
   struct QueryEntry {
     std::string query;
     size_t results_size;
-  } queries[] = {
-    { "bad query", 0 },
-    { std::string("xn--d1abbgf6aiiy.xn--p1ai"), 1 },
-    { base::WideToUTF8(L"\u043f\u0440\u0435\u0437"
-                       L"\u0438\u0434\u0435\u043d\u0442.\u0440\u0444"), 1, },
   };
+  auto queries = std::to_array<QueryEntry>({
+      {"bad query", 0},
+      {std::string("xn--d1abbgf6aiiy.xn--p1ai"), 1},
+      {
+          base::WideToUTF8(L"\u043f\u0440\u0435\u0437"
+                           L"\u0438\u0434\u0435\u043d\u0442.\u0440\u0444"),
+          1,
+      },
+  });
 
   for (size_t i = 0; i < std::size(queries); ++i) {
     QueryHistory(queries[i].query, options, &results);
@@ -474,15 +450,200 @@ TEST_F(HistoryQueryTest, Paging) {
   // Since results are fetched 1 and 2 at a time, entry #0 and #6 will not
   // be de-duplicated.
   int expected_results[] = {4, 2, 3, 1, 7, 6, 5, 8, 9, 10, 11, 12, 13, 14, 0};
-  TestPaging(std::string(), expected_results, std::size(expected_results));
+  TestPaging(std::string(), expected_results);
 }
 
 TEST_F(HistoryQueryTest, TextSearchPaging) {
   // Since results are fetched 1 and 2 at a time, entry #0 and #6 will not
   // be de-duplicated. Entry #4 does not contain the text "title", so it
   // shouldn't appear.
-  int expected_results[] = { 2, 3, 1, 7, 6, 5 };
-  TestPaging("title", expected_results, std::size(expected_results));
+  int expected_results[] = {2, 3, 1, 7, 6, 5};
+  TestPaging("title", expected_results);
+}
+
+TEST_F(HistoryQueryTest, HostnameSuffixMatching) {
+  ASSERT_TRUE(history_.get());
+
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(
+      kBrowsingHistoryImprovedHostnameSuffixMatching);
+
+  // Add test entries to verify suffix matching.
+  // Note: "http://example.com/" is already populated in SetUp().
+  const TestEntry entries[] = {
+      {"http://www.example.com/", "Host WWW Example", 1,
+       base::Time::Now() - base::Days(1)},
+      {"http://subdomain.example.com/", "Host Subdomain Example", 2,
+       base::Time::Now() - base::Days(2)},
+      {"http://www.somesite.com/", "Host WWW Somesite", 3,
+       base::Time::Now() - base::Days(3)},
+      {"http://somesite.com.someothersite.com/", "Host Subdomain of Other", 4,
+       base::Time::Now() - base::Days(4)},
+      {"http://some.site/somesite.com", "Host Path Match Only", 5,
+       base::Time::Now() - base::Days(5)},
+      {"http://mysomesite.com/", "Host Non-Subdomain Prefix", 6,
+       base::Time::Now() - base::Days(6)},
+  };
+  for (const auto& entry : entries) {
+    AddEntryToHistory(entry);
+  }
+
+  // Normal text search matches all entries containing "example.test" in URL or
+  // title (including path and title matches).
+  {
+    QueryOptions options;
+    QueryResults results;
+    QueryHistory("example.test", options, &results);
+    EXPECT_EQ(7U, results.size());
+    EXPECT_TRUE(NthResultIs(results, 0, 8));
+    EXPECT_TRUE(NthResultIs(results, 1, 9));
+    EXPECT_TRUE(NthResultIs(results, 2, 10));
+    EXPECT_TRUE(NthResultIs(results, 3, 11));
+    EXPECT_TRUE(NthResultIs(results, 4, 12));
+    EXPECT_TRUE(NthResultIs(results, 5, 13));
+    EXPECT_TRUE(NthResultIs(results, 6, 14));
+  }
+
+  // With hostname_suffix set, only actual host matches (including HTTP, HTTPS,
+  // and non-standard ports) are returned.
+  {
+    QueryOptions options;
+    options.hostname_suffix = "example.test";
+    QueryResults results;
+    QueryHistory("", options, &results);
+    EXPECT_EQ(4U, results.size());
+    EXPECT_TRUE(NthResultIs(results, 0, 8));
+    EXPECT_TRUE(NthResultIs(results, 1, 9));
+    EXPECT_TRUE(NthResultIs(results, 2, 10));
+    EXPECT_TRUE(NthResultIs(results, 3, 11));
+
+    // Combined text and host search.
+    QueryHistory("page_1", options, &results);
+    EXPECT_EQ(1U, results.size());
+    EXPECT_TRUE(NthResultIs(results, 0, 9));
+
+    // Text matching URL on different host should not be returned.
+    QueryHistory("Evil", options, &results);
+    EXPECT_EQ(0U, results.size());
+  }
+
+  // host:example.com matches example.com, www.example.com, and
+  // subdomain.example.com.
+  {
+    QueryOptions options;
+    options.hostname_suffix = "example.com";
+    QueryResults results;
+    QueryHistory("", options, &results);
+    EXPECT_THAT(
+        results,
+        testing::UnorderedElementsAre(
+            testing::Property(&URLResult::url, GURL("http://example.com/")),
+            testing::Property(&URLResult::url, GURL("http://www.example.com/")),
+            testing::Property(&URLResult::url,
+                              GURL("http://subdomain.example.com/"))));
+  }
+
+  // host:www.example.com matches www.example.com.
+  {
+    QueryOptions options;
+    options.hostname_suffix = "www.example.com";
+    QueryResults results;
+    QueryHistory("", options, &results);
+    EXPECT_EQ(1U, results.size());
+    EXPECT_EQ(GURL("http://www.example.com/"), results[0].url());
+  }
+
+  // host:somesite.com matches www.somesite.com, but not
+  // somesite.com.someothersite.com, and also not some.site/somesite.com, and
+  // also not mysomesite.com.
+  {
+    QueryOptions options;
+    options.hostname_suffix = "somesite.com";
+    QueryResults results;
+    QueryHistory("", options, &results);
+    EXPECT_EQ(1U, results.size());
+    EXPECT_EQ(GURL("http://www.somesite.com/"), results[0].url());
+  }
+
+  // Combined text and host search:
+  // "Subdomain" with hostname_suffix "example.com" should match only
+  // subdomain.example.com.
+  {
+    QueryOptions options;
+    options.hostname_suffix = "example.com";
+    QueryResults results;
+    QueryHistory("Subdomain", options, &results);
+    EXPECT_EQ(1U, results.size());
+    EXPECT_EQ(GURL("http://subdomain.example.com/"), results[0].url());
+  }
+
+  // With kBrowsingHistoryImprovedHostnameSuffixMatching enabled, matching is
+  // case-insensitive for both host-only and combined queries.
+  {
+    QueryOptions options;
+    options.hostname_suffix = "ExAmPlE.cOm";
+    QueryResults results;
+    QueryHistory("", options, &results);
+    EXPECT_EQ(3U, results.size());
+
+    QueryHistory("Subdomain", options, &results);
+    EXPECT_EQ(1U, results.size());
+    EXPECT_EQ(GURL("http://subdomain.example.com/"), results[0].url());
+  }
+}
+
+TEST_F(HistoryQueryTest, HostnameSuffixMatchingImprovementsDisabled) {
+  ASSERT_TRUE(history_.get());
+
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndDisableFeature(
+      kBrowsingHistoryImprovedHostnameSuffixMatching);
+
+  const TestEntry entries[] = {
+      {"http://www.example.com/", "Host WWW Example", 1,
+       base::Time::Now() - base::Days(1)},
+      {"http://subdomain.example.com/", "Host Subdomain Example", 2,
+       base::Time::Now() - base::Days(2)},
+  };
+  for (const auto& entry : entries) {
+    AddEntryToHistory(entry);
+  }
+
+  // With feature disabled, exact host matching is used instead of suffix.
+  // "example.com" only matches example.com (from SetUp), not www.example.com.
+  {
+    QueryOptions options;
+    options.hostname_suffix = "example.com";
+    QueryResults results;
+    QueryHistory("", options, &results);
+    EXPECT_THAT(results, testing::UnorderedElementsAre(testing::Property(
+                             &URLResult::url, GURL("http://example.com/"))));
+  }
+
+  // Combined text and host search with feature disabled:
+  // Text search for "Other" with hostname_suffix "example.com" matches only
+  // exact host, and matching is case-sensitive.
+  {
+    QueryOptions options;
+    options.hostname_suffix = "example.com";
+    QueryResults results;
+    QueryHistory("Other", options, &results);
+    EXPECT_EQ(1U, results.size());
+    EXPECT_EQ(GURL("http://example.com/"), results[0].url());
+
+    QueryHistory("Subdomain", options, &results);
+    EXPECT_EQ(0U, results.size());
+
+    options.hostname_suffix = "ExAmPlE.cOm";
+    QueryHistory("", options, &results);
+    EXPECT_EQ(0U, results.size());
+    QueryHistory("Other", options, &results);
+    EXPECT_EQ(0U, results.size());
+
+    options.hostname_suffix = "ExAmPlE.tEsT";
+    QueryHistory("", options, &results);
+    EXPECT_EQ(0U, results.size());
+  }
 }
 
 }  // namespace history

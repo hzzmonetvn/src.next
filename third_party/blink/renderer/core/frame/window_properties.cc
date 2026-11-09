@@ -29,21 +29,6 @@ v8::Local<v8::Value> WindowProperties::AnonymousNamedGetter(
 
   v8::Isolate* isolate = frame->GetWindowProxyManager()->GetIsolate();
 
-  if (auto reason = window->GetProxyAccessBlockedReason(isolate)) [[unlikely]] {
-    // We need to not throw an exception if we're dealing with the special
-    // "then" property but return undefined instead. See
-    // https://html.spec.whatwg.org/#crossoriginpropertyfallback-(-p-). This
-    // makes sure WindowProxy is thenable, see the original discussion here:
-    // https://github.com/whatwg/dom/issues/536.
-    if (name == "then") {
-      return v8::Local<v8::Value>();
-    }
-    V8ThrowDOMException::Throw(
-        isolate, DOMExceptionCode::kSecurityError,
-        DOMWindow::GetProxyAccessBlockedExceptionMessage(*reason));
-    return v8::Null(isolate);
-  }
-
   // Note that named access on WindowProxy is allowed in the cross-origin case.
   // 7.4.5 [[GetOwnProperty]] (P), step 6.
   // https://html.spec.whatwg.org/C/#windowproxy-getownproperty
@@ -55,8 +40,6 @@ v8::Local<v8::Value> WindowProperties::AnonymousNamedGetter(
   if (child) {
     window->ReportCoopAccess("named");
     window->RecordWindowProxyAccessMetrics(
-        WebFeature::kWindowProxyCrossOriginAccessNamedGetter,
-        WebFeature::kWindowProxyCrossOriginAccessFromOtherPageNamedGetter,
         mojom::blink::WindowProxyAccessType::kAnonymousNamedGetter);
     UseCounter::Count(CurrentExecutionContext(isolate),
                       WebFeature::kNamedAccessOnWindow_ChildBrowsingContext);
@@ -99,8 +82,6 @@ v8::Local<v8::Value> WindowProperties::AnonymousNamedGetter(
   }
   window->ReportCoopAccess("named");
   window->RecordWindowProxyAccessMetrics(
-      WebFeature::kWindowProxyCrossOriginAccessNamedGetter,
-      WebFeature::kWindowProxyCrossOriginAccessFromOtherPageNamedGetter,
       mojom::blink::WindowProxyAccessType::kAnonymousNamedGetter);
 
   // If we've reached this point, we know that we're accessing an element (or
@@ -119,9 +100,9 @@ v8::Local<v8::Value> WindowProperties::AnonymousNamedGetter(
   if (!items->IsEmpty()) {
     UseCounter::Count(doc, WebFeature::kDOMClobberedWindowPropertyAccessed);
 
-    // TODO(esprehn): Firefox doesn't return an HTMLCollection here if there's
-    // multiple with the same name, but Chrome and Safari does. What's the
-    // right behavior?
+    // Per spec, return the element if there is exactly one match, otherwise
+    // an HTMLCollection.
+    // https://html.spec.whatwg.org/C/#named-access-on-the-window-object
     if (items->HasExactlyOneItem()) {
       return ToV8Traits<Element>::ToV8(script_state, items->item(0));
     }

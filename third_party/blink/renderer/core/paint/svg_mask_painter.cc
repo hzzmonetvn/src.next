@@ -14,8 +14,10 @@
 #include "third_party/blink/renderer/core/paint/object_paint_properties.h"
 #include "third_party/blink/renderer/core/paint/paint_auto_dark_mode.h"
 #include "third_party/blink/renderer/core/paint/svg_background_paint_context.h"
+#include "third_party/blink/renderer/core/style/fill_layer.h"
 #include "third_party/blink/renderer/core/style/style_mask_source_image.h"
 #include "third_party/blink/renderer/core/svg/svg_length_functions.h"
+#include "third_party/blink/renderer/platform/graphics/blend_mode.h"
 #include "third_party/blink/renderer/platform/graphics/graphics_context_state_saver.h"
 #include "third_party/blink/renderer/platform/graphics/paint/drawing_display_item.h"
 #include "third_party/blink/renderer/platform/graphics/paint/drawing_recorder.h"
@@ -93,18 +95,23 @@ const StyleMaskSourceImage* ToMaskSourceIfSVGMask(
 void PaintMaskLayer(const FillLayer& layer,
                     const LayoutObject& object,
                     const SVGBackgroundPaintContext& bg_paint_context,
-                    GraphicsContext& context) {
+                    GraphicsContext& context,
+                    PaintFlags paint_flags) {
   const StyleImage* style_image = layer.GetImage();
   if (!style_image) {
+    return;
+  }
+
+  if ((paint_flags & PaintFlag::kReadBackAllowedRendering) &&
+      !style_image->IsCorsSameOrigin()) {
     return;
   }
 
   std::optional<ScopedMaskLuminanceLayer> mask_luminance_scope;
   SkBlendMode composite_op = SkBlendMode::kSrcOver;
   // Don't use the operator if this is the bottom layer.
-  if (layer.Next()) {
-    composite_op = WebCoreCompositeToSkiaComposite(layer.Composite(),
-                                                   layer.GetBlendMode());
+  if (layer.NextForUsedValue()) {
+    composite_op = ToSkBlendMode(layer.Composite(), layer.GetBlendMode());
   }
 
   if (layer.MaskMode() == EFillMaskMode::kLuminance) {
@@ -130,7 +137,7 @@ void PaintMaskLayer(const FillLayer& layer,
     saver.Save();
     SVGMaskPainter::PaintSVGMaskLayer(
         context, *mask_source, observer, reference_box, zoom, composite_op,
-        layer.MaskMode() == EFillMaskMode::kMatchSource);
+        layer.MaskMode() == EFillMaskMode::kMatchSource, paint_flags);
     return;
   }
 
@@ -142,8 +149,10 @@ void PaintMaskLayer(const FillLayer& layer,
   }
 
   const Document& document = object.GetDocument();
-  scoped_refptr<Image> image = style_image->GetImage(
-      observer, document, style, gfx::SizeF(geometry.TileSize()));
+  const Node* node = object.GetNode();
+  scoped_refptr<Image> image =
+      style_image->GetImage(observer, node ? *node : document, style,
+                            gfx::SizeF(geometry.TileSize()));
   if (!image) {
     return;
   }
@@ -171,6 +180,8 @@ void PaintMaskLayer(const FillLayer& layer,
       break;
     case EFillBox::kStrokeBox:
     case EFillBox::kBorder:
+    case EFillBox::kBorderArea:
+    case EFillBox::kBorderAreaText:
       clip_box.emplace(GeometryBox::kStrokeBox);
       break;
     case EFillBox::kViewBox:
@@ -215,16 +226,25 @@ void PaintMaskLayer(const FillLayer& layer,
   // This call takes the unscaled image, applies the given scale, and paints it
   // into the dest rect using phase and the given repeat spacing. Note the
   // phase is already scaled.
-  const ImagePaintTimingInfo paint_timing_info(false, false);
   context.DrawImageTiled(*image, dest_rect, tiling_info, image_auto_dark_mode,
-                         paint_timing_info, composite_op, respect_orientation);
+                         ReportPaintTiming::kDoNotReport, composite_op,
+                         respect_orientation);
 }
 
+template <typename Callback>
+void IterateFillLayersReversed(const FillLayer* layer, Callback callback) {
+  if (!layer) {
+    return;
+  }
+  IterateFillLayersReversed(layer->NextForUsedValue(), callback);
+  callback(*layer);
+}
 }  // namespace
 
 void SVGMaskPainter::Paint(GraphicsContext& context,
                            const LayoutObject& layout_object,
-                           const DisplayItemClient& display_item_client) {
+                           const DisplayItemClient& display_item_client,
+                           PaintFlags paint_flags) {
   const auto* properties = layout_object.FirstFragment().PaintProperties();
   DCHECK(properties);
   DCHECK(properties->Mask());
@@ -245,15 +265,14 @@ void SVGMaskPainter::Paint(GraphicsContext& context,
   DrawingRecorder recorder(context, display_item_client, DisplayItem::kSVGMask,
                            gfx::ToEnclosingRect(visual_rect));
 
-  Vector<const FillLayer*, 8> layer_list;
-  for (const FillLayer* layer = &layout_object.StyleRef().MaskLayers(); layer;
-       layer = layer->Next()) {
-    layer_list.push_back(layer);
-  }
   const SVGBackgroundPaintContext bg_paint_context(layout_object);
-  for (const auto* layer : base::Reversed(layer_list)) {
-    PaintMaskLayer(*layer, layout_object, bg_paint_context, context);
-  }
+  IterateFillLayersReversed(&layout_object.Style().MaskLayers(),
+                            [&layout_object, &bg_paint_context, &context,
+                             paint_flags](const FillLayer& layer) {
+                              PaintMaskLayer(layer, layout_object,
+                                             bg_paint_context, context,
+                                             paint_flags);
+                            });
 }
 
 void SVGMaskPainter::PaintSVGMaskLayer(GraphicsContext& context,
@@ -262,22 +281,26 @@ void SVGMaskPainter::PaintSVGMaskLayer(GraphicsContext& context,
                                        const gfx::RectF& reference_box,
                                        const float zoom,
                                        const SkBlendMode composite_op,
-                                       const bool apply_mask_type) {
+                                       const bool apply_mask_type,
+                                       PaintFlags paint_flags) {
   LayoutSVGResourceMasker* masker =
       ResolveElementReference(mask_source, observer);
   if (!masker) {
     return;
   }
+  if ((paint_flags & PaintFlag::kReadBackAllowedRendering) &&
+      !masker->GetElement()->IsInCanvasSubtree()) {
+    return;
+  }
   const AffineTransform content_transformation =
       MaskToContentTransform(*masker, reference_box, zoom);
   SubtreeContentTransformScope content_transform_scope(content_transformation);
-  PaintRecord record = masker->CreatePaintRecord();
+  PaintRecord record = masker->CreatePaintRecord(paint_flags);
 
   context.Clip(masker->ResourceBoundingBox(reference_box, zoom));
 
   bool has_layer = false;
-  if (apply_mask_type &&
-      masker->StyleRef().MaskType() == EMaskType::kLuminance) {
+  if (apply_mask_type && masker->Style().MaskType() == EMaskType::kLuminance) {
     context.BeginLayer(cc::ColorFilter::MakeLuma(), &composite_op);
     has_layer = true;
   } else if (composite_op != SkBlendMode::kSrcOver) {
@@ -298,7 +321,7 @@ bool SVGMaskPainter::MaskIsValid(const StyleMaskSourceImage& mask_source,
 
 gfx::RectF SVGMaskPainter::ResourceBoundsForSVGChild(
     const LayoutObject& object) {
-  const ComputedStyle& style = object.StyleRef();
+  const ComputedStyle& style = object.Style();
   const gfx::RectF reference_box = SVGResources::ReferenceBoxForEffects(
       object, GeometryBox::kFillBox,
       SVGResources::ForeignObjectQuirk::kDisabled);
@@ -306,7 +329,7 @@ gfx::RectF SVGMaskPainter::ResourceBoundsForSVGChild(
       object.IsSVGForeignObject() ? style.EffectiveZoom() : 1;
   gfx::RectF bounds;
   for (const FillLayer* layer = &style.MaskLayers(); layer;
-       layer = layer->Next()) {
+       layer = layer->NextForUsedValue()) {
     const auto* mask_source =
         DynamicTo<StyleMaskSourceImage>(layer->GetImage());
     if (!mask_source) {

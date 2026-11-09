@@ -66,6 +66,27 @@ class HostZoomMapImplBrowserTest : public ContentBrowserTest {
   raw_ptr<HostZoomMapImpl> host_zoom_map_impl_;
 };
 
+// For a URL without a host the zoom level is keyed by spec. A same-document
+// fragment navigation must not change the key.
+IN_PROC_BROWSER_TEST_F(HostZoomMapImplBrowserTest,
+                       HostlessURLKeepsZoomAcrossFragmentNavigation) {
+  const GURL file_url = GetTestUrl("", "title1.html");
+  ASSERT_TRUE(file_url.GetHost().empty());
+  EXPECT_TRUE(NavigateToURL(shell(), file_url));
+  WebContents* web_contents = shell()->web_contents();
+
+  HostZoomMap::SetZoomLevel(web_contents, 2.5);
+  EXPECT_DOUBLE_EQ(2.5, HostZoomMap::GetZoomLevel(web_contents));
+
+  const GURL fragment_url(file_url.spec() + "#fragment");
+  EXPECT_TRUE(NavigateToURL(shell(), fragment_url));
+  EXPECT_EQ(fragment_url,
+            web_contents->GetPrimaryMainFrame()->GetLastCommittedURL());
+
+  EXPECT_DOUBLE_EQ(2.5, HostZoomMap::GetZoomLevel(web_contents));
+  EXPECT_EQ(file_url, HostZoomMap::GetURLForWebContents(web_contents));
+}
+
 // Test to make sure that GetZoomLevel() works properly for zoom levels
 // stored by host value, and can distinguish temporary zoom levels from
 // these.
@@ -74,7 +95,7 @@ IN_PROC_BROWSER_TEST_F(HostZoomMapImplBrowserTest, GetZoomForView_Host) {
   double host_zoom_level = default_zoom_level + 1.0;
   double temp_zoom_level = default_zoom_level + 2.0;
 
-  host_zoom_map_impl_->SetZoomLevelForHost(url_.host(), host_zoom_level);
+  host_zoom_map_impl_->SetZoomLevelForHost(url_.GetHost(), host_zoom_level);
 
   RunTestForURL(host_zoom_level, temp_zoom_level);
 }
@@ -88,8 +109,8 @@ IN_PROC_BROWSER_TEST_F(HostZoomMapImplBrowserTest,
   double host_zoom_level = default_zoom_level + 1.0;
   double temp_zoom_level = default_zoom_level + 2.0;
 
-  host_zoom_map_impl_->SetZoomLevelForHostAndScheme(url_.scheme(), url_.host(),
-                                                    host_zoom_level);
+  host_zoom_map_impl_->SetZoomLevelForHostAndScheme(
+      url_.GetScheme(), url_.GetHost(), host_zoom_level);
 
   RunTestForURL(host_zoom_level, temp_zoom_level);
 }
@@ -102,7 +123,7 @@ IN_PROC_BROWSER_TEST_F(HostZoomMapImplBrowserTest,
   // At the default level, there should be no adjustment.
   EXPECT_DOUBLE_EQ(host_zoom_map_impl_->GetDefaultZoomLevel(),
                    host_zoom_map_impl_->GetZoomLevelForHostAndSchemeAndroid(
-                       url_.scheme(), url_.host()));
+                       url_.GetScheme(), url_.GetHost()));
 
   host_zoom_map_impl_->SetShouldAdjustForOSLevelForTesting(true);
 
@@ -110,19 +131,22 @@ IN_PROC_BROWSER_TEST_F(HostZoomMapImplBrowserTest,
   // A scale of 1.3 is equivalent to an Android OS font size of XL.
   // Zoom level will be 1.44 for exponential scale: 1.2 ^ 1.44 = 1.30.
   host_zoom_map_impl_->SetSystemFontScaleForTesting(1.30);
-  EXPECT_DOUBLE_EQ(1.44,
-                   host_zoom_map_impl_->GetZoomLevelForHostAndSchemeAndroid(
-                       url_.scheme(), url_.host()));
+  EXPECT_NEAR(1.44,
+              host_zoom_map_impl_->GetZoomLevelForHostAndSchemeAndroid(
+                  url_.GetScheme(), url_.GetHost()),
+              0.01);
 
   host_zoom_map_impl_->SetSystemFontScaleForTesting(0.85);
-  EXPECT_DOUBLE_EQ(-0.89,
-                   host_zoom_map_impl_->GetZoomLevelForHostAndSchemeAndroid(
-                       url_.scheme(), url_.host()));
+  EXPECT_NEAR(-0.89,
+              host_zoom_map_impl_->GetZoomLevelForHostAndSchemeAndroid(
+                  url_.GetScheme(), url_.GetHost()),
+              0.01);
 
   host_zoom_map_impl_->SetSystemFontScaleForTesting(1.15);
-  EXPECT_DOUBLE_EQ(0.77,
-                   host_zoom_map_impl_->GetZoomLevelForHostAndSchemeAndroid(
-                       url_.scheme(), url_.host()));
+  EXPECT_NEAR(0.77,
+              host_zoom_map_impl_->GetZoomLevelForHostAndSchemeAndroid(
+                  url_.GetScheme(), url_.GetHost()),
+              0.01);
 }
 
 // Same as above test but without the OS-level adjustment.
@@ -131,7 +155,7 @@ IN_PROC_BROWSER_TEST_F(HostZoomMapImplBrowserTest,
   // At the default level, there should be no adjustment.
   EXPECT_DOUBLE_EQ(host_zoom_map_impl_->GetDefaultZoomLevel(),
                    host_zoom_map_impl_->GetZoomLevelForHostAndSchemeAndroid(
-                       url_.scheme(), url_.host()));
+                       url_.GetScheme(), url_.GetHost()));
 
   host_zoom_map_impl_->SetShouldAdjustForOSLevelForTesting(false);
 
@@ -140,15 +164,15 @@ IN_PROC_BROWSER_TEST_F(HostZoomMapImplBrowserTest,
   // Zoom level should remain zero because we are ignoring OS setting.
   host_zoom_map_impl_->SetSystemFontScaleForTesting(1.30);
   EXPECT_DOUBLE_EQ(0, host_zoom_map_impl_->GetZoomLevelForHostAndSchemeAndroid(
-                          url_.scheme(), url_.host()));
+                          url_.GetScheme(), url_.GetHost()));
 
   host_zoom_map_impl_->SetSystemFontScaleForTesting(0.85);
   EXPECT_DOUBLE_EQ(0, host_zoom_map_impl_->GetZoomLevelForHostAndSchemeAndroid(
-                          url_.scheme(), url_.host()));
+                          url_.GetScheme(), url_.GetHost()));
 
   host_zoom_map_impl_->SetSystemFontScaleForTesting(1.15);
   EXPECT_DOUBLE_EQ(0, host_zoom_map_impl_->GetZoomLevelForHostAndSchemeAndroid(
-                          url_.scheme(), url_.host()));
+                          url_.GetScheme(), url_.GetHost()));
 }
 
 #endif

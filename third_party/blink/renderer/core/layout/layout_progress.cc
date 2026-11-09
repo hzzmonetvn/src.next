@@ -45,13 +45,13 @@ LayoutProgress::LayoutProgress(HTMLProgressElement& node)
 
 LayoutProgress::~LayoutProgress() = default;
 
-void LayoutProgress::WillBeDestroyed() {
+void LayoutProgress::WillBeDestroyed(const ComputedStyle* style) {
   NOT_DESTROYED();
   if (animating_) {
     animation_timer_.Stop();
     animating_ = false;
   }
-  LayoutBlockFlow::WillBeDestroyed();
+  LayoutBlockFlow::WillBeDestroyed(style);
 }
 
 void LayoutProgress::UpdateFromElement() {
@@ -100,7 +100,7 @@ void LayoutProgress::AnimationTimerFired(TimerBase*) {
 
 void LayoutProgress::UpdateAnimationState() {
   NOT_DESTROYED();
-  bool animating = !IsDeterminate() && StyleRef().HasEffectiveAppearance();
+  bool animating = !IsDeterminate() && Style().HasEffectiveAppearance();
   if (animating == animating_)
     return;
 

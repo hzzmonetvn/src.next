@@ -7,6 +7,7 @@
 #include <functional>
 
 #include "base/metrics/histogram_functions.h"
+#include "base/notreached.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
 #include "components/download/public/common/download_item.h"
@@ -39,12 +40,15 @@ enum class AddWarningActionEventOutcome {
   ADDED_WARNING_FIRST_SHOWN = 4,
   // The warning action event is successfully added.
   ADDED_WARNING_ACTION = 5,
-  kMaxValue = ADDED_WARNING_ACTION
+  // The warning action event is not added because the download is not
+  // dangerous.
+  NOT_ADDED_DOWNLOAD_NOT_DANGEROUS = 6,
+  kMaxValue = NOT_ADDED_DOWNLOAD_NOT_DANGEROUS
 };
 
 void RecordAddWarningActionEventOutcome(AddWarningActionEventOutcome outcome) {
   base::UmaHistogramEnumeration(
-      "Download.WarningData.AddWarningActionEventOutcome", outcome);
+      "Download.WarningData.AddWarningActionEventOutcome2", outcome);
 }
 
 void RecordSurfaceWithoutWarningShown(WarningSurface surface) {
@@ -106,6 +110,11 @@ void DownloadItemWarningData::AddWarningActionEvent(DownloadItem* download,
         AddWarningActionEventOutcome::NOT_ADDED_MISSING_DOWNLOAD);
     return;
   }
+  if (!download->IsDangerous()) {
+    RecordAddWarningActionEventOutcome(
+        AddWarningActionEventOutcome::NOT_ADDED_DOWNLOAD_NOT_DANGEROUS);
+    return;
+  }
   DownloadItemWarningData* data = GetOrCreate(download);
   if (action == WarningAction::SHOWN) {
     if (!data->logged_downloads_page_shown_ &&
@@ -143,7 +152,7 @@ void DownloadItemWarningData::AddWarningActionEvent(DownloadItem* download,
   bool is_terminal_action = action == WarningAction::PROCEED ||
                             action == WarningAction::DISCARD ||
                             action == WarningAction::PROCEED_DEEP_SCAN;
-  DCHECK_NE(WarningAction::SHOWN, action);
+  CHECK_NE(WarningAction::SHOWN, action, base::NotFatalUntil::M161);
   data->action_events_.emplace_back(surface, action, action_latency,
                                     is_terminal_action);
   RecordAddWarningActionEventOutcome(

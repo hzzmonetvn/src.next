@@ -4,9 +4,11 @@
 
 #include "chrome/browser/chained_back_navigation_tracker.h"
 
+#include "base/strings/string_number_conversions.h"
 #include "base/test/bind.h"
 #include "base/test/task_environment.h"
 #include "chrome/test/base/chrome_render_view_host_test_harness.h"
+#include "components/tabs/public/mock_tab_interface.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/navigation_simulator.h"
@@ -39,9 +41,10 @@ TEST_F(ChainedBackNavigationTrackerTest, ChainedBackNavigationStatus) {
     NavigateAndCommit(url);
   }
 
-  ChainedBackNavigationTracker::CreateForWebContents(web_contents());
+  tabs::MockTabInterface tab;
+  ChainedBackNavigationTracker tracker_instance(tab, web_contents());
   const ChainedBackNavigationTracker* tracker =
-      ChainedBackNavigationTracker::FromWebContents(web_contents());
+      ChainedBackNavigationTracker::From(&tab);
   ASSERT_TRUE(tracker);
 
   // Before any back navigation, the return value for these two checker
@@ -72,9 +75,10 @@ TEST_F(ChainedBackNavigationTrackerTest,
     NavigateAndCommit(url);
   }
 
-  ChainedBackNavigationTracker::CreateForWebContents(web_contents());
+  tabs::MockTabInterface tab;
+  ChainedBackNavigationTracker tracker_instance(tab, web_contents());
   const ChainedBackNavigationTracker* tracker =
-      ChainedBackNavigationTracker::FromWebContents(web_contents());
+      ChainedBackNavigationTracker::From(&tab);
   ASSERT_TRUE(tracker);
 
   // Before any back navigation, the return value for these two checker
@@ -112,9 +116,10 @@ TEST_F(
     NavigateAndCommit(url);
   }
 
-  ChainedBackNavigationTracker::CreateForWebContents(web_contents());
+  tabs::MockTabInterface tab;
+  ChainedBackNavigationTracker tracker_instance(tab, web_contents());
   const ChainedBackNavigationTracker* tracker =
-      ChainedBackNavigationTracker::FromWebContents(web_contents());
+      ChainedBackNavigationTracker::From(&tab);
   ASSERT_TRUE(tracker);
 
   // Before any back navigation, the return value for these two checker
@@ -147,9 +152,10 @@ TEST_F(ChainedBackNavigationTrackerTest,
     NavigateAndCommit(url);
   }
 
-  ChainedBackNavigationTracker::CreateForWebContents(web_contents());
+  tabs::MockTabInterface tab;
+  ChainedBackNavigationTracker tracker_instance(tab, web_contents());
   ChainedBackNavigationTracker* tracker =
-      ChainedBackNavigationTracker::FromWebContents(web_contents());
+      ChainedBackNavigationTracker::From(&tab);
   ASSERT_TRUE(tracker);
 
   // Before any back navigation, the return value for these two checker

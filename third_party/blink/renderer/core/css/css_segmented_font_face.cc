@@ -25,6 +25,8 @@
 
 #include "third_party/blink/renderer/core/css/css_segmented_font_face.h"
 
+#include <ranges>
+
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "third_party/blink/renderer/core/css/cascade_layer_map.h"
@@ -67,13 +69,14 @@ void CSSSegmentedFontFace::AddFontFace(FontFace* font_face,
   font_faces_->Insert(font_face, css_connected);
 }
 
-void CSSSegmentedFontFace::RemoveFontFace(FontFace* font_face) {
+bool CSSSegmentedFontFace::RemoveFontFace(FontFace* font_face) {
   if (!font_faces_->Erase(font_face)) {
-    return;
+    return false;
   }
 
   font_data_table_.clear();
   font_face->CssFontFace()->RemoveSegmentedFontFace(this);
+  return true;
 }
 
 const FontData* CSSSegmentedFontFace::GetFontData(
@@ -224,12 +227,9 @@ bool CascadePriorityHigherThan(const FontFace& new_font_face,
               ->GetScopedStyleResolver()
               ->GetCascadeLayerMap();
   }
-  if (!map) {
-    return true;
-  }
-  return map->CompareLayerOrder(
-             existing_font_face.GetStyleRule()->GetCascadeLayer(),
-             new_font_face.GetStyleRule()->GetCascadeLayer()) <= 0;
+  return CascadeLayerMap::CompareLayerOrder(
+             map, existing_font_face.GetLayeredStyleRule(),
+             new_font_face.GetLayeredStyleRule()) <= 0;
 }
 
 }  // namespace
@@ -294,12 +294,12 @@ void FontFaceList::ForEach(
 
 void FontFaceList::ForEachReverseUntilTrue(
     base::FunctionRef<bool(const Member<FontFace>&)> func) const {
-  for (auto& font_face : base::Reversed(non_css_connected_face_)) {
+  for (auto& font_face : std::views::reverse(non_css_connected_face_)) {
     if (func(font_face)) {
       return;
     }
   }
-  for (auto& font_face : base::Reversed(css_connected_face_)) {
+  for (auto& font_face : std::views::reverse(css_connected_face_)) {
     if (func(font_face)) {
       return;
     }
@@ -308,10 +308,10 @@ void FontFaceList::ForEachReverseUntilTrue(
 
 void FontFaceList::ForEachReverse(
     base::FunctionRef<void(const Member<FontFace>&)> func) const {
-  for (auto& font_face : base::Reversed(non_css_connected_face_)) {
+  for (auto& font_face : std::views::reverse(non_css_connected_face_)) {
     func(font_face);
   }
-  for (auto& font_face : base::Reversed(css_connected_face_)) {
+  for (auto& font_face : std::views::reverse(css_connected_face_)) {
     func(font_face);
   }
 }

@@ -12,6 +12,8 @@
 
 namespace blink {
 
+class LocalFrame;
+
 // Focus changes that cross a fenced frame boundary are observable by both
 // frames involved in the focus change. Because of that, focus calls that
 // originate from a JavaScript call can be used as a communication channel
@@ -21,7 +23,12 @@ namespace blink {
 // communication channel. However, if a focus call can only be triggered
 // directly through user interaction and can't be triggered via script, it is
 // safe to not gate the focus call on user activation.
-enum class FocusTrigger { kScript, kUserGesture };
+enum class FocusTrigger {
+  // e.g. by calling `window.focus()`
+  kScript,
+  // e.g. by the user using tab to advance focus
+  kUserGesture,
+};
 
 struct FocusParams {
   STACK_ALLOCATED();
@@ -34,20 +41,26 @@ struct FocusParams {
               mojom::blink::FocusType focus_type,
               InputDeviceCapabilities* capabilities,
               const FocusOptions* focus_options = FocusOptions::Create(),
-              FocusTrigger focus_trigger = FocusTrigger::kScript)
+              FocusTrigger focus_trigger = FocusTrigger::kScript,
+              LocalFrame* initiator_frame = nullptr)
       : selection_behavior(selection),
         type(focus_type),
         source_capabilities(capabilities),
         options(focus_options),
-        focus_trigger(focus_trigger) {}
+        focus_trigger(focus_trigger),
+        initiator_frame(initiator_frame) {}
 
   SelectionBehaviorOnFocus selection_behavior =
       SelectionBehaviorOnFocus::kRestore;
   mojom::blink::FocusType type = mojom::blink::FocusType::kNone;
   InputDeviceCapabilities* source_capabilities = nullptr;
   const FocusOptions* options = nullptr;
-  bool omit_blur_events = false;
+  BlurEventBehavior blur_event_behavior = BlurEventBehavior::kFire;
   FocusTrigger focus_trigger = FocusTrigger::kScript;
+  // The frame whose script initiated the focus call. Used by the
+  // `focus-without-user-activation` policy to check against the correct setter
+  // when the target element is in a different document.
+  LocalFrame* initiator_frame = nullptr;
 };
 
 }  // namespace blink

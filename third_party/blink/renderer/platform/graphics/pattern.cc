@@ -36,13 +36,15 @@
 
 namespace blink {
 
-scoped_refptr<Pattern> Pattern::CreateImagePattern(
+std::unique_ptr<Pattern> Pattern::CreateImagePattern(
     scoped_refptr<Image> tile_image,
-    RepeatMode repeat_mode) {
-  return ImagePattern::Create(std::move(tile_image), repeat_mode);
+    RepeatMode repeat_mode,
+    RespectImageOrientationEnum respect_orientation) {
+  return ImagePattern::Create(std::move(tile_image), repeat_mode,
+                              respect_orientation);
 }
 
-scoped_refptr<Pattern> Pattern::CreatePaintRecordPattern(
+std::unique_ptr<Pattern> Pattern::CreatePaintRecordPattern(
     PaintRecord record,
     const gfx::RectF& record_bounds,
     RepeatMode repeat_mode) {

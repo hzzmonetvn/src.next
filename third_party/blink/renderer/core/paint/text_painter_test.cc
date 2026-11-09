@@ -62,7 +62,7 @@ TEST_F(TextPainterTest, TextPaintingStyle_Simple) {
   PaintController controller;
   GraphicsContext context(controller);
   TextPaintStyle text_style = TextPainter::TextPaintingStyle(
-      GetLayoutText().GetDocument(), GetLayoutText().StyleRef(),
+      GetLayoutText().GetDocument(), GetLayoutText().Style(),
       CreatePaintInfoForBackground(context));
   EXPECT_EQ(Color(0, 0, 255), text_style.fill_color);
   EXPECT_EQ(Color(0, 0, 255), text_style.stroke_color);
@@ -88,7 +88,7 @@ TEST_F(TextPainterTest, TextPaintingStyle_AllProperties) {
   PaintController controller;
   GraphicsContext context(controller);
   TextPaintStyle text_style = TextPainter::TextPaintingStyle(
-      GetLayoutText().GetDocument(), GetLayoutText().StyleRef(),
+      GetLayoutText().GetDocument(), GetLayoutText().Style(),
       CreatePaintInfoForBackground(context));
   EXPECT_EQ(Color(255, 0, 0), text_style.fill_color);
   EXPECT_EQ(Color(0, 255, 0), text_style.stroke_color);
@@ -98,7 +98,7 @@ TEST_F(TextPainterTest, TextPaintingStyle_AllProperties) {
   EXPECT_EQ(1u, text_style.shadow->Shadows().size());
   EXPECT_EQ(1, text_style.shadow->Shadows()[0].X());
   EXPECT_EQ(2, text_style.shadow->Shadows()[0].Y());
-  EXPECT_EQ(3, text_style.shadow->Shadows()[0].Blur());
+  EXPECT_EQ(3, text_style.shadow->Shadows()[0].BlurRadius());
   EXPECT_EQ(Color(255, 255, 0),
             text_style.shadow->Shadows()[0].GetColor().GetColor());
 }
@@ -120,7 +120,7 @@ TEST_F(TextPainterTest, TextPaintingStyle_UsesTextAsClip) {
   PaintController controller;
   GraphicsContext context(controller);
   TextPaintStyle text_style = TextPainter::TextPaintingStyle(
-      GetLayoutText().GetDocument(), GetLayoutText().StyleRef(),
+      GetLayoutText().GetDocument(), GetLayoutText().Style(),
       CreatePaintInfoForTextClip(context));
   EXPECT_EQ(Color::kBlack, text_style.fill_color);
   EXPECT_EQ(Color::kBlack, text_style.stroke_color);
@@ -137,8 +137,8 @@ TEST_F(TextPainterTest,
       CSSPropertyID::kWebkitTextStrokeColor, CSSValueID::kLime);
   GetDocument().body()->SetInlineStyleProperty(
       CSSPropertyID::kTextEmphasisColor, CSSValueID::kBlue);
-  GetDocument().body()->SetInlineStyleProperty(
-      CSSPropertyID::kWebkitPrintColorAdjust, CSSValueID::kEconomy);
+  GetDocument().body()->SetInlineStyleProperty(CSSPropertyID::kPrintColorAdjust,
+                                               CSSValueID::kEconomy);
   GetDocument().GetSettings()->SetShouldPrintBackgrounds(false);
   gfx::SizeF page_size(500, 800);
   GetFrame().StartPrinting(WebPrintParams(page_size));
@@ -150,7 +150,7 @@ TEST_F(TextPainterTest,
   PaintController controller;
   GraphicsContext context(controller);
   TextPaintStyle text_style = TextPainter::TextPaintingStyle(
-      GetLayoutText().GetDocument(), GetLayoutText().StyleRef(),
+      GetLayoutText().GetDocument(), GetLayoutText().Style(),
       CreatePaintInfoForBackground(context));
   EXPECT_EQ(Color(255, 0, 0), text_style.fill_color);
   EXPECT_EQ(Color(0, 255, 0), text_style.stroke_color);
@@ -164,8 +164,8 @@ TEST_F(TextPainterTest, TextPaintingStyle_ForceBackgroundToWhite_Darkened) {
       CSSPropertyID::kWebkitTextStrokeColor, "rgb(220, 255, 220)");
   GetDocument().body()->SetInlineStyleProperty(
       CSSPropertyID::kTextEmphasisColor, "rgb(220, 220, 255)");
-  GetDocument().body()->SetInlineStyleProperty(
-      CSSPropertyID::kWebkitPrintColorAdjust, CSSValueID::kEconomy);
+  GetDocument().body()->SetInlineStyleProperty(CSSPropertyID::kPrintColorAdjust,
+                                               CSSValueID::kEconomy);
   GetDocument().GetSettings()->SetShouldPrintBackgrounds(false);
   gfx::SizeF page_size(500, 800);
   GetFrame().StartPrinting(WebPrintParams(page_size));
@@ -177,7 +177,7 @@ TEST_F(TextPainterTest, TextPaintingStyle_ForceBackgroundToWhite_Darkened) {
   PaintController controller;
   GraphicsContext context(controller);
   TextPaintStyle text_style = TextPainter::TextPaintingStyle(
-      GetLayoutText().GetDocument(), GetLayoutText().StyleRef(),
+      GetLayoutText().GetDocument(), GetLayoutText().Style(),
       CreatePaintInfoForBackground(context));
   EXPECT_EQ(Color(255, 220, 220).Dark(), text_style.fill_color);
   EXPECT_EQ(Color(220, 255, 220).Dark(), text_style.stroke_color);

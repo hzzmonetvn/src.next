@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "content/public/browser/web_contents_observer.h"
-#include "content/public/browser/web_contents_user_data.h"
+#include "content/public/common/child_process_id.h"
 
 class Profile;
 
@@ -21,10 +21,9 @@ class PrefRegistrySyncable;
 // results page of the default search engine and prewarming the fonts that were
 // previously used the last time a search results page of the default search
 // engine was visited.
-class FontPrewarmerTabHelper
-    : public content::WebContentsObserver,
-      public content::WebContentsUserData<FontPrewarmerTabHelper> {
+class FontPrewarmerTabHelper : public content::WebContentsObserver {
  public:
+  explicit FontPrewarmerTabHelper(content::WebContents* web_contents);
   FontPrewarmerTabHelper(const FontPrewarmerTabHelper&) = delete;
   FontPrewarmerTabHelper& operator=(const FontPrewarmerTabHelper&) = delete;
   ~FontPrewarmerTabHelper() override;
@@ -32,10 +31,7 @@ class FontPrewarmerTabHelper
   static void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry);
 
  private:
-  friend class content::WebContentsUserData<FontPrewarmerTabHelper>;
   friend class FontPrewarmerTabHelperTest;
-
-  explicit FontPrewarmerTabHelper(content::WebContents* web_contents);
 
   // Testing helpers:
   static std::string GetSearchResultsPageFontsPref();
@@ -54,9 +50,7 @@ class FontPrewarmerTabHelper
   void ReadyToCommitNavigation(
       content::NavigationHandle* navigation_handle) override;
 
-  std::optional<int> expected_render_process_host_id_;
-
-  WEB_CONTENTS_USER_DATA_KEY_DECL();
+  content::ChildProcessId expected_render_process_host_id_;
 };
 
 #endif  // CHROME_BROWSER_FONT_PREWARMER_TAB_HELPER_H_

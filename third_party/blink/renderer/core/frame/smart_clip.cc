@@ -32,7 +32,6 @@
 
 #include "third_party/blink/renderer/core/dom/container_node.h"
 #include "third_party/blink/renderer/core/dom/document.h"
-#include "third_party/blink/renderer/core/dom/node_computed_style.h"
 #include "third_party/blink/renderer/core/dom/node_traversal.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
@@ -166,7 +165,7 @@ Node* SmartClip::FindBestOverlappingNode(
     gfx::Rect node_rect = node->PixelSnappedBoundingBox();
     auto* element = DynamicTo<Element>(node);
     if (element &&
-        EqualIgnoringASCIICase(
+        EqualIgnoringAsciiCase(
             element->FastGetAttribute(html_names::kAriaHiddenAttr), "true")) {
       node = NodeTraversal::NextSkippingChildren(*node, root_node);
       continue;
@@ -176,7 +175,7 @@ Node* SmartClip::FindBestOverlappingNode(
     if (layout_object && !node_rect.IsEmpty()) {
       if (layout_object->IsText() || layout_object->IsLayoutImage() ||
           node->IsFrameOwnerElement() ||
-          (layout_object->StyleRef().HasBackgroundImage() &&
+          (layout_object->Style().HasBackgroundImage() &&
            !ShouldSkipBackgroundImage(node))) {
         if (resized_crop_rect.Intersects(node_rect)) {
           min_node = MinNodeContainsNodes(min_node, node);
@@ -206,12 +205,9 @@ bool SmartClip::ShouldSkipBackgroundImage(Node* node) {
   // or a width. On the other hand, if we've got a legit background image,
   // it's very likely the height or the width will be set to auto.
   LayoutObject* layout_object = node->GetLayoutObject();
-  if (layout_object && (layout_object->StyleRef()
-                            .LogicalHeight()
-                            .HasAutoOrContentOrIntrinsic() ||
-                        layout_object->StyleRef()
-                            .LogicalWidth()
-                            .HasAutoOrContentOrIntrinsic())) {
+  if (layout_object &&
+      (layout_object->Style().LogicalHeight().HasAutoOrContentOrIntrinsic() ||
+       layout_object->Style().LogicalWidth().HasAutoOrContentOrIntrinsic())) {
     return true;
   }
 
@@ -244,7 +240,7 @@ String SmartClip::ExtractTextFromNode(Node* node) {
     LayoutObject* layout_object = current_node.GetLayoutObject();
 
     if (!layout_object ||
-        layout_object->StyleRef().UsedUserSelect() == EUserSelect::kNone) {
+        layout_object->Style().UsedUserSelect() == EUserSelect::kNone) {
       continue;
     }
     if (Node* node_from_frame = NodeInsideFrame(&current_node)) {

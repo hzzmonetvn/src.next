@@ -6,11 +6,19 @@
 #define CHROME_BROWSER_SIGNIN_SIGNIN_UI_DELEGATE_H_
 
 #include <string>
+#include <type_traits>
 
-#include "chrome/browser/ui/webui/signin/turn_sync_on_helper.h"
+#include "base/functional/callback_forward.h"
+#include "chrome/browser/signin/cross_device_signin_promo_manager.h"
+#include "components/signin/public/base/signin_buildflags.h"
 #include "components/signin/public/base/signin_metrics.h"
+#include "url/gurl.h"
 
-class Browser;
+#if BUILDFLAG(ENABLE_DICE_SUPPORT)
+#include "chrome/browser/ui/webui/signin/turn_sync_on_helper.h"
+#endif
+
+class BrowserWindowInterface;
 class Profile;
 struct CoreAccountId;
 
@@ -24,11 +32,13 @@ class SigninUiDelegate {
  public:
   // Displays a sign-in prompt to the user.
   // `enable_sync` indicates whether the sync should be enabled after the user
-  // successfully signs in.
+  // successfully signs in. When this prompt is displayed for extensions, we
+  // also pass the `extension_name`.
   virtual void ShowSigninUI(Profile* profile,
                             bool enable_sync,
                             signin_metrics::AccessPoint access_point,
-                            signin_metrics::PromoAction promo_action) = 0;
+                            signin_metrics::PromoAction promo_action,
+                            const std::string& extension_name) = 0;
 
   // Displays a reauth prompt to the user for an account with indicated `email`.
   // This account should be already known to Chrome.
@@ -42,6 +52,7 @@ class SigninUiDelegate {
                             signin_metrics::AccessPoint access_point,
                             signin_metrics::PromoAction promo_action) = 0;
 
+#if BUILDFLAG(ENABLE_DICE_SUPPORT)
   // Displays a sync confirmation dialog to the user for an account with
   // identified by `account_id`. Account must be a valid (have no auth error)
   // account added to `profile`.
@@ -51,11 +62,30 @@ class SigninUiDelegate {
       signin_metrics::PromoAction promo_action,
       const CoreAccountId& account_id,
       TurnSyncOnHelper::SigninAbortedMode signin_aborted_mode,
-      bool is_sync_promo);
+      bool is_sync_promo,
+      bool user_already_signed_in);
+
+  // Displays a history sync opt-in dialog to the user for an account
+  // identified by `account_id`. Account must be a valid (have no auth error).
+  // Virtual for testing purpose.
+  virtual void ShowHistorySyncOptinUI(Profile* profile,
+                                      const CoreAccountId& account_id,
+                                      signin_metrics::AccessPoint access_point);
+
+  virtual void ShowCrossDeviceSigninQrBubble(
+      BrowserWindowInterface* browser,
+      GURL qr_code_url,
+      base::OnceClosure closing_callback,
+      CrossDeviceSigninPromoEntryPoint entry_point) = 0;
 
  protected:
-  static Browser* EnsureBrowser(Profile* profile);
+  static BrowserWindowInterface* EnsureBrowser(Profile* profile);
+#endif  // BUILDFLAG(ENABLE_DICE_SUPPORT)
 };
+
+static_assert(std::is_trivially_destructible_v<SigninUiDelegate>,
+              "SigninUiDelegate must remain trivially destructible to be "
+              "statically defined!");
 
 }  // namespace signin_ui_util
 

@@ -5,27 +5,31 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_LAYOUT_INK_OVERFLOW_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_LAYOUT_INK_OVERFLOW_H_
 
+#include <array>
 #include <optional>
 
 #include "base/check_op.h"
 #include "base/dcheck_is_on.h"
+#include "base/memory/raw_ptr_exclusion.h"
 #include "build/build_config.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/editing/markers/document_marker.h"
 #include "third_party/blink/renderer/core/layout/geometry/physical_rect.h"
 #include "third_party/blink/renderer/core/layout/inline/text_offset_range.h"
+#include "third_party/blink/renderer/platform/text/writing_mode.h"
 
 namespace blink {
 
 class AffineTransform;
 class AppliedTextDecoration;
 class ComputedStyle;
-class Font;
 class FragmentItem;
 class InlineCursor;
 class InlinePaintContext;
+class LayoutObject;
 class ShadowList;
 class Text;
+class UsedFont;
 struct LogicalRect;
 struct TextFragmentPaintInfo;
 
@@ -138,7 +142,6 @@ class CORE_EXPORT InkOverflow {
                              const InlineCursor& cursor,
                              const TextFragmentPaintInfo& text_info,
                              const ComputedStyle& style,
-                             const Font& scaled_font,
                              const gfx::RectF& rect,
                              float scaling_factor,
                              float length_adjust_scale,
@@ -149,7 +152,6 @@ class CORE_EXPORT InkOverflow {
       const InlineCursor& cursor,
       const TextFragmentPaintInfo& text_info,
       const ComputedStyle& style,
-      const Font& scaled_font,
       const PhysicalRect& rect_in_container,
       const InlinePaintContext* inline_context);
 
@@ -175,11 +177,16 @@ class CORE_EXPORT InkOverflow {
   static LogicalRect ComputeDecorationOverflow(
       const InlineCursor& cursor,
       const ComputedStyle& style,
-      const Font& scaled_font,
+      const UsedFont& used_font,
       const PhysicalOffset& container_offset,
       const LogicalRect& ink_overflow,
       const InlinePaintContext* inline_context,
       const WritingMode writing_mode);
+
+  // Returns ink-overflow with caret overflow in logical direction.
+  static LogicalRect ComputeCaretOverflow(const InlineCursor& cursor,
+                                          const ComputedStyle& style,
+                                          const LogicalRect& ink_overflow_in);
 
 #if DCHECK_IS_ON()
   struct ReadUnsetAsNoneScope {
@@ -194,12 +201,17 @@ class CORE_EXPORT InkOverflow {
 #endif
 
  private:
+  // |fragment_cursor| is used to determine where the fragment sits within its
+  // decorated run so that `text-decoration-inset` trims match painting
+  // exactly. When null, conservative bounds are computed instead (insets never
+  // shrink the bounds, and expanding insets are always applied).
   static LogicalRect ComputeAppliedDecorationOverflow(
       const ComputedStyle& style,
-      const Font& scaled_font,
+      const UsedFont& used_font,
       const PhysicalOffset& offset_in_container,
       const LogicalRect& ink_overflow,
       const InlinePaintContext* inline_context,
+      const InlineCursor* fragment_cursor,
       const AppliedTextDecoration* decoration_override = nullptr);
 
   // For all markers but custom highlights. i.e. those with only one
@@ -210,8 +222,9 @@ class CORE_EXPORT InkOverflow {
       const FragmentItem* fragment_item,
       const TextOffsetRange& fragment_dom_offsets,
       Text* node,
+      const LayoutObject&,
       const ComputedStyle& style,
-      const Font& scaled_font,
+      const UsedFont& used_font,
       const PhysicalOffset& offset_in_container,
       const LogicalRect& ink_overflow,
       const InlinePaintContext* inline_context,
@@ -222,8 +235,9 @@ class CORE_EXPORT InkOverflow {
       const FragmentItem* fragment_item,
       const TextOffsetRange& fragment_dom_offsets,
       Text* text_node,
+      const LayoutObject& layout_object,
       const ComputedStyle& style,
-      const Font& scaled_font,
+      const UsedFont& used_font,
       const PhysicalOffset& offset_in_container,
       const LogicalRect& ink_overflow,
       const InlinePaintContext* inline_context);
@@ -260,11 +274,13 @@ class CORE_EXPORT InkOverflow {
 
   union {
     // When only self or contents overflow.
-    SingleInkOverflow* single_;
+    // RAW_PTR_EXCLUSION: #union
+    RAW_PTR_EXCLUSION SingleInkOverflow* single_;
     // When both self and contents overflow.
-    ContainerInkOverflow* container_;
+    // RAW_PTR_EXCLUSION: #union
+    RAW_PTR_EXCLUSION ContainerInkOverflow* container_;
     // Outsets in small |LayoutUnit|s when overflow is small.
-    SmallRawValue outsets_[4];
+    std::array<SmallRawValue, 4> outsets_;
     static_assert(sizeof(outsets_) == sizeof(single_),
                   "outsets should be the size of a pointer");
   };

@@ -29,7 +29,7 @@ bool DownloadAutoOpenPolicyHandler::CheckPolicySettings(
       !policy_value->is_list())
     return false;
 
-  const base::Value::List& policy_list = policy_value->GetList();
+  const base::ListValue& policy_list = policy_value->GetList();
   for (size_t i = 0; i < policy_list.size(); ++i) {
     const std::string extension = policy_list[i].GetString();
     // If it's empty or malformed, then mark it as an error.
@@ -52,9 +52,9 @@ void DownloadAutoOpenPolicyHandler::ApplyPolicySettings(
   std::unique_ptr<base::Value> policy_value;
   if (!CheckAndGetValue(policies, nullptr, &policy_value) || !policy_value)
     return;
-  DCHECK(policy_value->is_list());
+  CHECK(policy_value->is_list(), base::NotFatalUntil::M161);
 
-  base::Value::List pref_values;
+  base::ListValue pref_values;
   for (const auto& entry : policy_value->GetList()) {
     const std::string extension = entry.GetString();
     // If it's empty or malformed, then skip the entry.

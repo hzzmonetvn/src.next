@@ -7,47 +7,55 @@ package org.chromium.chrome.browser.tasks.tab_management;
 import android.app.Activity;
 import android.view.ViewGroup;
 
-import androidx.annotation.Nullable;
-
+import org.chromium.base.Callback;
 import org.chromium.base.CallbackController;
 import org.chromium.base.Token;
 import org.chromium.base.ValueChangedCallback;
-import org.chromium.base.supplier.ObservableSupplier;
+import org.chromium.base.supplier.MonotonicObservableSupplier;
+import org.chromium.base.supplier.NonNullObservableSupplier;
 import org.chromium.base.supplier.OneshotSupplier;
 import org.chromium.base.supplier.OneshotSupplierImpl;
 import org.chromium.base.task.PostTask;
 import org.chromium.base.task.TaskTraits;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.ActivityTabProvider;
+import org.chromium.chrome.browser.bookmarks.TabBookmarker;
 import org.chromium.chrome.browser.browser_controls.BrowserControlsStateProvider;
 import org.chromium.chrome.browser.data_sharing.DataSharingTabManager;
 import org.chromium.chrome.browser.layouts.LayoutStateProvider;
-import org.chromium.chrome.browser.tab.EmptyTabObserver;
+import org.chromium.chrome.browser.share.ShareDelegate;
 import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.chrome.browser.tab.TabObserver;
 import org.chromium.chrome.browser.tab_ui.TabContentManager;
 import org.chromium.chrome.browser.tabmodel.TabCreatorManager;
+import org.chromium.chrome.browser.tabmodel.TabModel;
 import org.chromium.chrome.browser.tabmodel.TabModelSelector;
 import org.chromium.chrome.browser.theme.ThemeColorProvider;
+import org.chromium.chrome.browser.undo_tab_close_snackbar.UndoBarThrottle;
 import org.chromium.components.browser_ui.bottomsheet.BottomSheetController;
-import org.chromium.components.browser_ui.widget.scrim.ScrimCoordinator;
+import org.chromium.components.browser_ui.widget.scrim.ScrimManager;
 import org.chromium.ui.modaldialog.ModalDialogManager;
+
+import java.util.function.Supplier;
 
 /**
  * A custom {@link OneshotSupplier} for a {@link TabGroupUi}. The supplied value will remain null
  * until the current activity tab is in a tab group.
  */
+@NullMarked
 public class TabGroupUiOneshotSupplier extends OneshotSupplierImpl<TabGroupUi> {
 
     /** Controller containing the logic that manages when the supplier is set with a value. */
     private static class TabGroupUiCreationController {
         private final TabObserver mTabObserver =
-                new EmptyTabObserver() {
+                new TabObserver() {
                     @Override
                     public void onTabGroupIdChanged(Tab tab, @Nullable Token tabGroupId) {
                         postMaybeCreateTabGroupUi(tab);
                     }
                 };
-        private final ValueChangedCallback<Tab> mActivityTabObserver =
+        private final Callback<@Nullable Tab> mActivityTabObserver =
                 new ValueChangedCallback<>(this::onActivityTabChanged);
         private final ActivityTabProvider mActivityTabProvider;
         private final TabModelSelector mTabModelSelector;
@@ -61,7 +69,9 @@ public class TabGroupUiOneshotSupplier extends OneshotSupplierImpl<TabGroupUi> {
             mSetter = setter;
             mActivityTabProvider = activityTabProvider;
             mTabModelSelector = tabModelSelector;
-            activityTabProvider.addObserver(mActivityTabObserver);
+            activityTabProvider
+                    .asObservable()
+                    .addSyncObserverAndPostIfNonNull(mActivityTabObserver);
         }
 
         void destroy() {
@@ -69,7 +79,7 @@ public class TabGroupUiOneshotSupplier extends OneshotSupplierImpl<TabGroupUi> {
                 mCallbackController.destroy();
                 mCallbackController = null;
             }
-            mActivityTabProvider.removeObserver(mActivityTabObserver);
+            mActivityTabProvider.asObservable().removeObserver(mActivityTabObserver);
             // Trigger a null new tab selection to effectively unregister the observer from the old
             // tab.
             mActivityTabObserver.onResult(null);
@@ -88,12 +98,8 @@ public class TabGroupUiOneshotSupplier extends OneshotSupplierImpl<TabGroupUi> {
 
             if (tab == null || tab.isClosing() || tab.isDestroyed()) return;
 
-            boolean isInTabGroup =
-                    mTabModelSelector
-                            .getTabGroupModelFilterProvider()
-                            .getTabGroupModelFilter(tab.isIncognito())
-                            .isTabInTabGroup(tab);
-            if (!isInTabGroup) return;
+            TabModel tabModel = mTabModelSelector.getModel(tab.isIncognito());
+            if (!tabModel.isTabInTabGroup(tab)) return;
 
             mSetter.run();
             mSetter = null;
@@ -118,20 +124,25 @@ public class TabGroupUiOneshotSupplier extends OneshotSupplierImpl<TabGroupUi> {
      * Constructs a specialized {@link OneshotSupplier} for {@link TabGroupUi}.
      *
      * @param activityTabProvider Gives access to the current tab.
-     * @param tabModelSelector Gives access to the current set of {@TabModel}.
+     * @param tabModelSelector Gives access to the current set of {@link TabModel}.
      * @param activity The {@link Activity} that creates this surface.
      * @param parentView The parent view of this UI.
      * @param browserControlsStateProvider The {@link BrowserControlsStateProvider} of the top
      *     controls.
-     * @param scrimCoordinator The {@link ScrimCoordinator} to control scrim view.
+     * @param scrimManager The {@link ScrimManager} to control scrim view.
      * @param omniboxFocusStateSupplier Supplier to access the focus state of the omnibox.
      * @param bottomSheetController The {@link BottomSheetController} for the current activity.
-     * @param dataSharingTabManager The {@link} DataSharingTabManager managing communication between
+     * @param dataSharingTabManager The {@link DataSharingTabManager} managing communication between
      *     UI and DataSharing services.
      * @param tabContentManager Gives access to the tab content.
      * @param tabCreatorManager Manages creation of tabs.
      * @param layoutStateProviderSupplier Supplies the {@link LayoutStateProvider}.
      * @param modalDialogManager Used to show confirmation dialogs.
+     * @param themeColorProvider Used to provide the theme.
+     * @param undoBarThrottle Used to suppress the undo bar.
+     * @param tabBookmarkerSupplier Supplier of {@link TabBookmarker} for bookmarking a given tab.
+     * @param shareDelegateSupplier Supplies the {@link ShareDelegate} that will be used to share
+     *     the tab's URL when the user selects the "Share" option.
      */
     public TabGroupUiOneshotSupplier(
             ActivityTabProvider activityTabProvider,
@@ -139,33 +150,38 @@ public class TabGroupUiOneshotSupplier extends OneshotSupplierImpl<TabGroupUi> {
             Activity activity,
             ViewGroup parentView,
             BrowserControlsStateProvider browserControlsStateProvider,
-            ScrimCoordinator scrimCoordinator,
-            ObservableSupplier<Boolean> omniboxFocusStateSupplier,
+            ScrimManager scrimManager,
+            NonNullObservableSupplier<Boolean> omniboxFocusStateSupplier,
             BottomSheetController bottomSheetController,
             DataSharingTabManager dataSharingTabManager,
             TabContentManager tabContentManager,
             TabCreatorManager tabCreatorManager,
             OneshotSupplier<LayoutStateProvider> layoutStateProviderSupplier,
             ModalDialogManager modalDialogManager,
-            ThemeColorProvider themeColorProvider) {
+            ThemeColorProvider themeColorProvider,
+            UndoBarThrottle undoBarThrottle,
+            MonotonicObservableSupplier<TabBookmarker> tabBookmarkerSupplier,
+            Supplier<ShareDelegate> shareDelegateSupplier) {
         Runnable setter =
                 () -> {
                     var tabGroupUi =
-                            TabManagementDelegateProvider.getDelegate()
-                                    .createTabGroupUi(
-                                            activity,
-                                            parentView,
-                                            browserControlsStateProvider,
-                                            scrimCoordinator,
-                                            omniboxFocusStateSupplier,
-                                            bottomSheetController,
-                                            dataSharingTabManager,
-                                            tabModelSelector,
-                                            tabContentManager,
-                                            tabCreatorManager,
-                                            layoutStateProviderSupplier,
-                                            modalDialogManager,
-                                            themeColorProvider);
+                            TabGroupUiFactory.createTabGroupUi(
+                                    activity,
+                                    parentView,
+                                    browserControlsStateProvider,
+                                    scrimManager,
+                                    omniboxFocusStateSupplier,
+                                    bottomSheetController,
+                                    dataSharingTabManager,
+                                    tabModelSelector,
+                                    tabContentManager,
+                                    tabCreatorManager,
+                                    layoutStateProviderSupplier,
+                                    modalDialogManager,
+                                    themeColorProvider,
+                                    undoBarThrottle,
+                                    tabBookmarkerSupplier,
+                                    shareDelegateSupplier);
                     set(tabGroupUi);
                     maybeDestroyTabGroupUiCreationController();
                 };

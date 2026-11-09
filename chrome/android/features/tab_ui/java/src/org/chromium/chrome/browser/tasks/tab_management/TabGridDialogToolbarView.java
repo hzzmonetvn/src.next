@@ -15,6 +15,7 @@ import android.util.AttributeSet;
 import android.view.MotionEvent;
 import android.view.TouchDelegate;
 import android.view.View;
+import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -22,30 +23,51 @@ import android.widget.LinearLayout;
 
 import androidx.annotation.ColorInt;
 import androidx.annotation.ColorRes;
-import androidx.annotation.Nullable;
 import androidx.annotation.StringRes;
-import androidx.core.content.ContextCompat;
 import androidx.core.graphics.drawable.DrawableCompat;
 import androidx.core.widget.ImageViewCompat;
 
+import org.chromium.build.annotations.MonotonicNonNull;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.tab_ui.R;
 import org.chromium.components.tab_groups.TabGroupColorId;
+import org.chromium.components.tab_groups.TabGroupColorPickerUtils;
 import org.chromium.ui.KeyboardVisibilityDelegate;
 import org.chromium.ui.widget.ButtonCompat;
-import org.chromium.ui.widget.ChromeImageView;
 
 /** Toolbar used in the tab grid dialog see {@link TabGridDialogCoordinator}. */
+@NullMarked
 public class TabGridDialogToolbarView extends FrameLayout {
-    private ChromeImageView mNewTabButton;
-    private ChromeImageView mBackButton;
-    private ChromeImageView mMenuButton;
+    // This is equal to the animation duration of toolbar menu hiding.
+    private static final int SHOW_KEYBOARD_DELAY_MS = 150;
+
+    private ImageView mNewTabButton;
+    private ImageView mBackButton;
+    private ImageView mMenuButton;
     private EditText mTitleTextView;
     private LinearLayout mMainContent;
     private FrameLayout mColorIconContainer;
     private ImageView mColorIcon;
-    private @Nullable FrameLayout mShareButtonContainer;
-    private @Nullable ButtonCompat mShareButton;
+    private @MonotonicNonNull FrameLayout mShareButtonContainer;
+    private @MonotonicNonNull ButtonCompat mShareButton;
     private @Nullable FrameLayout mImageTilesContainer;
+    private boolean mNeedsKeyboardShow;
+    private boolean mNeedsFocus;
+
+    private final Runnable mShowKeyboardRunnable =
+            () -> {
+                if (!mTitleTextView.isFocused() && !mNeedsFocus) return;
+                if (hasWindowFocus()) {
+                    mNeedsKeyboardShow = false;
+                    KeyboardVisibilityDelegate delegate = KeyboardVisibilityDelegate.getInstance();
+                    if (!delegate.isKeyboardShowing(mTitleTextView)) {
+                        delegate.showKeyboard(mTitleTextView);
+                    }
+                } else {
+                    mNeedsKeyboardShow = true;
+                }
+            };
 
     public TabGridDialogToolbarView(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -59,6 +81,21 @@ public class TabGridDialogToolbarView extends FrameLayout {
         mNewTabButton = findViewById(R.id.toolbar_new_tab_button);
         mMenuButton = findViewById(R.id.toolbar_menu_button);
         mTitleTextView = (EditText) findViewById(R.id.title);
+        mTitleTextView.setAccessibilityDelegate(
+                new View.AccessibilityDelegate() {
+                    @Override
+                    public void onInitializeAccessibilityNodeInfo(
+                            View host, AccessibilityNodeInfo info) {
+                        super.onInitializeAccessibilityNodeInfo(host, info);
+                        String originalText =
+                                info.getText() == null ? "" : info.getText().toString();
+                        info.setText(
+                                getContext()
+                                        .getString(
+                                                R.string.accessibility_tab_group_title_field,
+                                                originalText));
+                    }
+                });
         mMainContent = findViewById(R.id.main_content);
         mColorIconContainer = findViewById(R.id.tab_group_color_icon_container);
         mColorIcon = findViewById(R.id.tab_group_color_icon);
@@ -100,6 +137,7 @@ public class TabGridDialogToolbarView extends FrameLayout {
     }
 
     void updateTitleTextFocus(boolean shouldFocus) {
+        mNeedsFocus = shouldFocus && !hasWindowFocus();
         if (mTitleTextView.isFocused() == shouldFocus) return;
         if (shouldFocus) {
             mTitleTextView.requestFocus();
@@ -108,27 +146,36 @@ public class TabGridDialogToolbarView extends FrameLayout {
         }
     }
 
+    @Override
+    public void onWindowFocusChanged(boolean hasWindowFocus) {
+        super.onWindowFocusChanged(hasWindowFocus);
+        if (hasWindowFocus) {
+            if (mNeedsFocus) {
+                mNeedsFocus = false;
+                mTitleTextView.requestFocus();
+            }
+            if (mNeedsKeyboardShow) {
+                mNeedsKeyboardShow = false;
+                removeCallbacks(mShowKeyboardRunnable);
+                post(mShowKeyboardRunnable);
+            }
+        }
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        super.onDetachedFromWindow();
+        removeCallbacks(mShowKeyboardRunnable);
+        mNeedsKeyboardShow = false;
+        mNeedsFocus = false;
+    }
+
     void updateKeyboardVisibility(boolean shouldShow) {
-        // This is equal to the animation duration of toolbar menu hiding.
-        int showKeyboardDelay = 150;
+        removeCallbacks(mShowKeyboardRunnable);
         if (shouldShow) {
-            // TODO(crbug.com/40144823) Figure out why a call to show keyboard without delay still
-            // won't work when the window gets focus in onWindowFocusChanged call.
-            // Wait until the current window has focus to show the keyboard. This is to deal with
-            // the case where the keyboard showing is caused by toolbar menu. In this case, we need
-            // to wait for the menu window to hide and current window to gain focus so that we can
-            // show the keyboard.
-            KeyboardVisibilityDelegate delegate = KeyboardVisibilityDelegate.getInstance();
-            postDelayed(
-                    new Runnable() {
-                        @Override
-                        public void run() {
-                            assert hasWindowFocus();
-                            delegate.showKeyboard(mTitleTextView);
-                        }
-                    },
-                    showKeyboardDelay);
+            postDelayed(mShowKeyboardRunnable, SHOW_KEYBOARD_DELAY_MS);
         } else {
+            mNeedsKeyboardShow = false;
             hideKeyboard();
         }
     }
@@ -152,7 +199,7 @@ public class TabGridDialogToolbarView extends FrameLayout {
                 isIncognito
                         ? R.color.default_icon_color_light_tint_list
                         : R.color.default_icon_color_tint_list;
-        ColorStateList tintList = ContextCompat.getColorStateList(getContext(), tintListRes);
+        ColorStateList tintList = getContext().getColorStateList(tintListRes);
         setTint(tintList);
     }
 
@@ -160,7 +207,7 @@ public class TabGridDialogToolbarView extends FrameLayout {
         mMainContent.setBackgroundColor(color);
     }
 
-    void setTint(ColorStateList tint) {
+    void setTint(@Nullable ColorStateList tint) {
         ImageViewCompat.setImageTintList(mBackButton, tint);
         ImageViewCompat.setImageTintList(mNewTabButton, tint);
         if (mTitleTextView != null) mTitleTextView.setTextColor(tint);
@@ -241,7 +288,7 @@ public class TabGridDialogToolbarView extends FrameLayout {
     void setColorIconColor(@TabGroupColorId int colorId, boolean isIncognito) {
         mColorIconContainer.setVisibility(View.VISIBLE);
         final @ColorInt int color =
-                ColorPickerUtils.getTabGroupColorPickerItemColor(
+                TabGroupColorPickerUtils.getTabGroupColorPickerItemColor(
                         getContext(), colorId, isIncognito);
 
         GradientDrawable gradientDrawable = (GradientDrawable) mColorIcon.getBackground();
@@ -250,11 +297,11 @@ public class TabGridDialogToolbarView extends FrameLayout {
         // Set accessibility content for the color icon.
         Resources res = getContext().getResources();
         final @StringRes int colorDescRes =
-                ColorPickerUtils.getTabGroupColorPickerItemColorAccessibilityString(colorId);
+                TabGroupColorPickerUtils.getTabGroupColorPickerItemColorAccessibilityString(
+                        colorId);
         String colorDesc = res.getString(colorDescRes);
         String contentDescription =
-                res.getString(
-                        R.string.accessibility_tab_group_color_icon_description, colorDesc);
+                res.getString(R.string.accessibility_tab_group_color_icon_description, colorDesc);
         mColorIconContainer.setContentDescription(contentDescription);
     }
 

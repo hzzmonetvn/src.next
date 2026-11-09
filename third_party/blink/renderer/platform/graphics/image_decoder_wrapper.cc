@@ -9,6 +9,7 @@
 #include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/renderer/platform/graphics/image_decoding_store.h"
 #include "third_party/blink/renderer/platform/graphics/image_frame_generator.h"
+#include "ui/gfx/geometry/skia_conversions.h"
 
 namespace blink {
 namespace {
@@ -102,9 +103,7 @@ bool IsLowEndDeviceOrPartialLowEndModeEnabled() {
 }  // namespace
 
 bool ImageDecoderWrapper::Decode(ImageDecoderFactory* factory,
-                                 wtf_size_t* frame_count,
                                  bool* has_alpha) {
-  DCHECK(frame_count);
   DCHECK(has_alpha);
 
   ImageDecoder* decoder = nullptr;
@@ -124,15 +123,14 @@ bool ImageDecoderWrapper::Decode(ImageDecoderFactory* factory,
     decoder = new_decoder.get();
   }
 
-  // For multi-frame image decoders, we need to know how many frames are
-  // in that image in order to release the decoder when all frames are
-  // decoded. FrameCount() is reliable only if all data is received and set in
-  // decoder, particularly with GIF.
-  if (all_data_received_)
-    *frame_count = decoder->FrameCount();
+  // For multi-frame image decoders, we need to know how many frames are in
+  // that image in order to release the decoder when all frames are decoded.
+  // `FrameCount()` is reliable only if all data is received and set in decoder,
+  // particularly with GIF.
+  wtf_size_t frame_count = all_data_received_ ? decoder->FrameCount() : 0u;
 
   const bool decode_to_external_memory =
-      ShouldDecodeToExternalMemory(*frame_count, resume_decoding);
+      ShouldDecodeToExternalMemory(frame_count, resume_decoding);
 
   ExternalMemoryAllocator external_memory_allocator(pixmap_);
   if (decode_to_external_memory)
@@ -189,8 +187,7 @@ bool ImageDecoderWrapper::Decode(ImageDecoderFactory* factory,
   // re-decoding of all frames in the dependency chain).
   const bool frame_was_completely_decoded =
       frame->GetStatus() == ImageFrame::kFrameComplete || all_data_received_;
-  PurgeAllFramesIfNecessary(decoder, frame_was_completely_decoded,
-                            *frame_count);
+  PurgeAllFramesIfNecessary(decoder, frame_was_completely_decoded, frame_count);
 
   const bool should_remove_decoder = ShouldRemoveDecoder(
       frame_was_completely_decoded, decode_to_external_memory);
@@ -215,6 +212,11 @@ bool ImageDecoderWrapper::Decode(ImageDecoderFactory* factory,
 bool ImageDecoderWrapper::ShouldDecodeToExternalMemory(
     wtf_size_t frame_count,
     bool resume_decoding) const {
+  // ImageDecoder::SetMemoryAllocator() only applies the allocator to frame 0.
+  if (frame_index_ != 0) {
+    return false;
+  }
+
   // Some multi-frame images need their decode cached in the decoder to allow
   // future frames to reference previous frames.
   //
@@ -233,9 +235,9 @@ bool ImageDecoderWrapper::ShouldDecodeToExternalMemory(
     return true;
   }
 
-  // TODO (scroggo): If !is_multi_frame_ && new_decoder && frame_count_, it
-  // should always be the case that 1u == frame_count_. But it looks like it
-  // is currently possible for frame_count_ to be another value.
+  // TODO (scroggo): If !is_multi_frame_ && new_decoder && frame_count, it
+  // should always be the case that 1u == frame_count. But it looks like it is
+  // currently possible for frame_count to be another value.
   if (1u == frame_count && all_data_received_ && !resume_decoding) {
     // Also use external allocator in situations when all of the data has been
     // received and there is not already a partial cache in the image decoder.
@@ -312,7 +314,8 @@ std::unique_ptr<ImageDecoder> ImageDecoderWrapper::CreateDecoderWithData(
   return ImageDecoder::Create(
       data_, all_data_received_, PixmapAlphaOption(pixmap_),
       high_bit_depth_decoding_option, decoder_color_behavior_, aux_image_,
-      Platform::GetMaxDecodedImageBytes(), pixmap_.dimensions());
+      Platform::GetMaxDecodedImageBytes(),
+      gfx::SkISizeToSize(pixmap_.dimensions()));
 }
 
 }  // namespace blink

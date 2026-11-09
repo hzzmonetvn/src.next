@@ -7,6 +7,7 @@
 
 #include <optional>
 
+#include "content/browser/embedder_isolation_info.h"
 #include "content/browser/site_info.h"
 #include "content/browser/url_info.h"
 #include "content/browser/web_exposed_isolation_info.h"
@@ -17,6 +18,12 @@
 namespace content {
 
 class IsolationContext;
+class ProcessLock;
+
+namespace rust::process_lock {
+// C++ function defined in process_lock_shim.cc. See friend declaration below.
+void SetIsUsed(ProcessLock& lock);
+}  // namespace rust::process_lock
 
 // ProcessLock is a core part of Site Isolation, which is used to determine
 // which documents are allowed to load in a process and which site data the
@@ -45,11 +52,14 @@ class CONTENT_EXPORT ProcessLock {
   // Create a lock that that represents a process that is associated with at
   // least one SiteInstance, but is not locked to a specific site. Any request
   // that wants to commit in this process must have a StoragePartitionConfig
-  // and web-exposed isolation information (COOP/COEP, for example) that
-  // match the values used to create this lock.
+  // and cross-origin isolation and web-exposed isolation information
+  // (COOP/COEP, for example) that match the values used to create this lock.
   static ProcessLock CreateAllowAnySite(
       const StoragePartitionConfig& storage_partition_config,
-      const WebExposedIsolationInfo& web_exposed_isolation_info);
+      const WebExposedIsolationInfo& web_exposed_isolation_info,
+      const std::optional<AgentClusterKey::CrossOriginIsolationKey>&
+          cross_origin_isolation_key,
+      const base::UnguessableToken& browser_context_id);
 
   // Create a lock for a specific UrlInfo. This method can be called from both
   // the UI and IO threads. Locks created with the same parameters must always
@@ -79,47 +89,36 @@ class CONTENT_EXPORT ProcessLock {
   // specific site. Any site is allowed to commit in the process as long as
   // the request's COOP/COEP information matches the info provided when
   // the lock was created.
-  bool allows_any_site() const {
-    return site_info_.has_value() && site_info_->process_lock_url().is_empty();
-  }
+  bool AllowsAnySite() const;
 
   // Returns true if the lock is restricted to a specific site and requires
   // the request's COOP/COEP information to match the values provided when
   // the lock was created.
-  bool is_locked_to_site() const {
-    return site_info_.has_value() && !site_info_->process_lock_url().is_empty();
-  }
+  bool IsLockedToSite() const;
 
   // Returns the url that corresponds to the SiteInfo the lock is used with. It
   // will always be the same as the site URL, except in cases where effective
   // urls are in use. Always empty if the SiteInfo uses the default site url.
-  // TODO(wjmaclean): Delete this accessor once we get to the point where we can
-  // safely just compare ProcessLocks directly.
-  const GURL lock_url() const {
-    return site_info_.has_value() ? site_info_->process_lock_url() : GURL();
-  }
+  // Note: this is derived from the AgentClusterKey. It's possible for two
+  // ProcessLocks to have the same process lock URL but different
+  // AgentClusterKeys when one of the AgentClusterKey is site keyed and the
+  // other is origin keyed, or when the two process locks have different
+  // cross-origin isolation status. This means that two ProcessLocks with the
+  // same process lock URL might not be considered equal. Therefore, compare
+  // ProcessLocks directly as much as possible.
+  GURL GetProcessLockURL() const;
 
   // Returns the site URL of the SiteInfo with which the lock was constructed.
-  // Prefer comparing ProcessLocks directly or using lock_url(), unless you
-  // care about effective URLs.
+  // Prefer comparing ProcessLocks directly or using agent_cluster_key(), unless
+  // you care about effective URLs.
   const GURL site_url() const {
     return site_info_.has_value() ? site_info_->site_url() : GURL();
   }
 
   // Returns the AgentClusterKey shared by agents allowed in this ProcessLock.
-  std::optional<AgentClusterKey> agent_cluster_key() const {
+  const AgentClusterKey agent_cluster_key() const {
     return site_info_.has_value() ? site_info_->agent_cluster_key()
-                                  : std::nullopt;
-  }
-
-  // Returns whether this ProcessLock is specific to an origin rather than
-  // including subdomains, such as due to opt-in origin isolation. This resolves
-  // an ambiguity of whether a process with a lock_url() like
-  // "https://foo.example" is allowed to include "https://sub.foo.example" or
-  // not.
-  bool is_origin_keyed_process() const {
-    return site_info_.has_value() &&
-           site_info_->requires_origin_keyed_process();
+                                  : AgentClusterKey();
   }
 
   // True if this ProcessLock is for a sandboxed iframe without
@@ -128,7 +127,7 @@ class CONTENT_EXPORT ProcessLock {
   // future if required for sandboxed iframes that are restricted with different
   // sandbox flags.
   bool is_sandboxed() const {
-    return site_info_.has_value() && site_info_->is_sandboxed();
+    return site_info_.has_value() && site_info_->IsSandboxed();
   }
 
   // If this ProcessLock is for a sandboxed iframe without allow-same-origin,
@@ -144,6 +143,14 @@ class CONTENT_EXPORT ProcessLock {
   // Returns whether this ProcessLock is specific to PDF contents.
   bool is_pdf() const { return site_info_.has_value() && site_info_->is_pdf(); }
 
+  // Returns the embedder-specified process isolation policy of the SiteInfo
+  // associated with this lock. See
+  // //content/browser/embedder_isolation_info.h.
+  EmbedderIsolationInfo embedder_isolation_info() const {
+    return site_info_.has_value() ? site_info_->embedder_isolation_info()
+                                  : EmbedderIsolationInfo::CreateNone();
+  }
+
   // Returns whether this ProcessLock can only be used for error pages.
   bool is_error_page() const {
     return site_info_.has_value() && site_info_->is_error_page();
@@ -152,7 +159,16 @@ class CONTENT_EXPORT ProcessLock {
   // Returns whether this ProcessLock is used for a <webview> guest process.
   // This may be false for other types of GuestView.
   bool is_guest() const {
-    return site_info_.has_value() && site_info_->is_guest();
+    return site_info_.has_value() && site_info_->IsGuest();
+  }
+
+  // Returns whether this ProcessLock is used for a privileged process (e.g.,
+  // for a WebContents created with PrivilegedParams). Privileged content always
+  // requires a dedicated process, so such a process hosts only privileged
+  // content.
+  bool is_privileged() const {
+    return site_info_.has_value() &&
+           site_info_->embedder_isolation_info().is_privileged();
   }
 
   // Returns whether this ProcessLock is used for a process that exclusively
@@ -190,9 +206,7 @@ class CONTENT_EXPORT ProcessLock {
   // not if the lock is empty or applies to an entire scheme (e.g., file://).
   bool IsASiteOrOrigin() const;
 
-  bool matches_scheme(const std::string& scheme) const {
-    return scheme == lock_url().scheme();
-  }
+  bool MatchesScheme(const std::string& scheme) const;
 
   // Returns true if lock_url() has an opaque origin.
   bool HasOpaqueOrigin() const;
@@ -207,20 +221,55 @@ class CONTENT_EXPORT ProcessLock {
   bool IsCompatibleWithWebExposedIsolation(const SiteInfo& site_info) const;
 
   bool operator==(const ProcessLock& rhs) const;
-  bool operator!=(const ProcessLock& rhs) const;
   // Defined to allow this object to act as a key for std::map.
   bool operator<(const ProcessLock& rhs) const;
+
+  // Indicates whether the process associated with this ProcessLock is
+  // "unused".  This starts out as true for new processes and becomes false
+  // after one of the following:
+  // (1) The process commits any page.
+  // (2) The process is given to a SiteInstance that already has a site
+  //     assigned.
+  // Note that a process hosting ServiceWorkers will be implicitly handled by
+  // (2) during ServiceWorker initialization, and SharedWorkers will be handled
+  // by (1) since a page needs to commit before it can create a SharedWorker.
+  //
+  // While a process is unused, it is still suitable to host a URL that
+  // requires a dedicated process. ChildProcessSecurityPolicyImpl relies on
+  // this to reject attempts to lock an already used process to a site; note
+  // that this class does not enforce that itself.
+  bool is_unused() const { return is_unused_; }
 
   std::string ToString() const;
 
  private:
+  // Only ChildProcessSecurityPolicyImpl may mark a ProcessLock as used. Both
+  // its C++ and Rust implementations call set_is_used() through this function
+  // so that CPSP does not need to be a friend of this class.
+  //
+  // Note: despite the `rust::process_lock` namespace, this is a C++ function
+  // (defined in process_lock_shim.cc alongside the other C++ shims exposed to
+  // Rust via FFI). The C++-only CPSP path calls it directly and does not go
+  // through any Rust code.
+  friend void rust::process_lock::SetIsUsed(ProcessLock& lock);
+
   explicit ProcessLock(const SiteInfo& site_info);
+
+  // Marks the process associated with this ProcessLock as used. Note that this
+  // only mutates this instance, so it has no effect when called on a copy
+  // returned by ChildProcessSecurityPolicyImpl::GetProcessLock().
+  void set_is_used() { is_unused_ = false; }
 
   // TODO(creis): Consider tracking multiple compatible SiteInfos in ProcessLock
   // (e.g., multiple sites when Site Isolation is disabled). This can better
   // restrict what the process has access to in cases that we currently use an
   // allows-any-site ProcessLock.
   std::optional<SiteInfo> site_info_;
+
+  // Indicates whether the process associated with this ProcessLock is
+  // "unused", meaning that it has not committed any page and it has not been
+  // given to a SiteInstance that already has a site assigned. See is_unused().
+  bool is_unused_ = true;
 };
 
 CONTENT_EXPORT std::ostream& operator<<(std::ostream& out,

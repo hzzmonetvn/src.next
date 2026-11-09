@@ -13,8 +13,10 @@
 #include "net/base/idempotency.h"
 #include "net/base/net_export.h"
 #include "net/base/network_anonymization_key.h"
+#include "net/base/network_handle.h"
 #include "net/base/network_isolation_key.h"
 #include "net/base/privacy_mode.h"
+#include "net/base/reconnect_notifier.h"
 #include "net/base/request_priority.h"
 #include "net/dns/public/secure_dns_policy.h"
 #include "net/http/http_request_headers.h"
@@ -122,18 +124,22 @@ struct NET_EXPORT HttpRequestInfo {
   // that the request is idempotent.
   Idempotency idempotency = DEFAULT_IDEMPOTENCY;
 
-  // If not null, the value is used to evaluate whether the cache entry should
-  // be bypassed; if is null, that means the request site does not match the
-  // filter.
-  std::optional<int64_t> fps_cache_filter;
-
-  // Use as ID to mark the cache entry when persisting. Should be a positive
-  // number once set.
-  std::optional<int64_t> browser_run_id;
-
   // Used to get a shared dictionary for the request. This may be null if the
   // request does not use a shared dictionary.
   SharedDictionaryGetter dictionary_getter;
+
+  // Used to notify when a reconnect-attempt may be invoked (e.g. when a
+  // connection was closed, or when the connection could not be established).
+  std::optional<ConnectionManagementConfig> connection_management_config;
+
+  // True if the request is for a pervasive, shared third-party resource.
+  bool is_shared_resource = false;
+
+  // TODO(crbug.com/495684670): Do not rely on this, it is not fully implemented
+  // yet. Once fully implemented, to prevent this from being unset, consider
+  // changing it to an optional and CHECK that it is set prior to use (see
+  // https://chromium-review.git.corp.google.com/c/chromium/src/+/7612167/comment/05941166_0f11478f/).
+  handles::NetworkHandle target_network = handles::kInvalidNetworkHandle;
 };
 
 }  // namespace net

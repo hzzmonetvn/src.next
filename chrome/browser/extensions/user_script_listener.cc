@@ -13,13 +13,17 @@
 #include "chrome/browser/profiles/profile_manager.h"
 #include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/navigation_throttle.h"
+#include "content/public/browser/navigation_throttle_registry.h"
 #include "extensions/browser/extension_system.h"
 #include "extensions/browser/scripting_utils.h"
 #include "extensions/browser/user_script_manager.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/manifest_handlers/content_scripts_handler.h"
 #include "extensions/common/url_pattern.h"
 #include "extensions/common/url_pattern_set.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 using content::NavigationThrottle;
 
@@ -27,14 +31,14 @@ namespace extensions {
 
 class UserScriptListener::Throttle : public NavigationThrottle {
  public:
-  explicit Throttle(content::NavigationHandle* navigation_handle)
-      : NavigationThrottle(navigation_handle) {}
+  explicit Throttle(content::NavigationThrottleRegistry& registry)
+      : NavigationThrottle(registry) {}
 
   Throttle(const Throttle&) = delete;
   Throttle& operator=(const Throttle&) = delete;
 
   void ResumeIfDeferred() {
-    DCHECK(should_defer_);
+    CHECK(should_defer_, base::NotFatalUntil::M161);
     should_defer_ = false;
     // Only resume the request if |this| has deferred it.
     if (did_defer_) {
@@ -92,15 +96,15 @@ UserScriptListener::UserScriptListener() {
   }
 }
 
-std::unique_ptr<NavigationThrottle>
-UserScriptListener::CreateNavigationThrottle(
-    content::NavigationHandle* navigation_handle) {
-  if (!ShouldDelayRequest(navigation_handle->GetURL()))
-    return nullptr;
+void UserScriptListener::CreateAndAddNavigationThrottle(
+    content::NavigationThrottleRegistry& registry) {
+  if (!ShouldDelayRequest(registry.GetNavigationHandle().GetURL())) {
+    return;
+  }
 
-  auto throttle = std::make_unique<Throttle>(navigation_handle);
+  auto throttle = std::make_unique<Throttle>(registry);
   throttles_.push_back(throttle->AsWeakPtr());
-  return throttle;
+  registry.AddThrottle(std::move(throttle));
 }
 
 void UserScriptListener::OnScriptsLoaded(content::BrowserContext* context) {
@@ -122,15 +126,16 @@ void UserScriptListener::TriggerUserScriptsReadyForTesting(
   UserScriptsReady(context);
 }
 
-UserScriptListener::~UserScriptListener() {}
+UserScriptListener::~UserScriptListener() = default;
 
 bool UserScriptListener::ShouldDelayRequest(const GURL& url) {
   // Note: we could delay only requests made by the profile who is causing the
   // delay, but it's a little more complicated to associate requests with the
   // right profile. Since this is a rare case, we'll just take the easy way
   // out.
-  if (user_scripts_ready_)
+  if (user_scripts_ready_) {
     return false;
+  }
 
   for (ProfileDataMap::const_iterator pt = profile_data_.begin();
        pt != profile_data_.end(); ++pt) {
@@ -150,8 +155,9 @@ bool UserScriptListener::ShouldDelayRequest(const GURL& url) {
 void UserScriptListener::StartDelayedRequests() {
   WeakThrottleList::const_iterator it;
   for (it = throttles_.begin(); it != throttles_.end(); ++it) {
-    if (it->get())
+    if (it->get()) {
       (*it)->ResumeIfDeferred();
+    }
   }
   throttles_.clear();
 }
@@ -162,16 +168,18 @@ void UserScriptListener::CheckIfAllUserScriptsReady() {
   user_scripts_ready_ = true;
   for (ProfileDataMap::const_iterator it = profile_data_.begin();
        it != profile_data_.end(); ++it) {
-    if (!it->second.user_scripts_ready)
+    if (!it->second.user_scripts_ready) {
       user_scripts_ready_ = false;
+    }
   }
 
-  if (user_scripts_ready_ && !was_ready)
+  if (user_scripts_ready_ && !was_ready) {
     StartDelayedRequests();
+  }
 }
 
 void UserScriptListener::UserScriptsReady(content::BrowserContext* context) {
-  DCHECK(!context->IsOffTheRecord());
+  CHECK(!context->IsOffTheRecord(), base::NotFatalUntil::M161);
 
   profile_data_[context].user_scripts_ready = true;
   CheckIfAllUserScriptsReady();
@@ -179,20 +187,20 @@ void UserScriptListener::UserScriptsReady(content::BrowserContext* context) {
 
 void UserScriptListener::AppendNewURLPatterns(content::BrowserContext* context,
                                               const URLPatterns& new_patterns) {
-  DCHECK(!context->IsOffTheRecord());
+  CHECK(!context->IsOffTheRecord(), base::NotFatalUntil::M161);
 
   user_scripts_ready_ = false;
 
   ProfileData& data = profile_data_[context];
   data.user_scripts_ready = false;
 
-  data.url_patterns.insert(data.url_patterns.end(),
-                           new_patterns.begin(), new_patterns.end());
+  data.url_patterns.insert(data.url_patterns.end(), new_patterns.begin(),
+                           new_patterns.end());
 }
 
 void UserScriptListener::ReplaceURLPatterns(content::BrowserContext* context,
                                             const URLPatterns& patterns) {
-  DCHECK_EQ(1U, profile_data_.count(context));
+  CHECK_EQ(1U, profile_data_.count(context), base::NotFatalUntil::M161);
   profile_data_[context].url_patterns = patterns;
 }
 
@@ -221,8 +229,9 @@ void UserScriptListener::OnProfileAdded(Profile* profile) {
   }
 
   auto* registry = ExtensionRegistry::Get(profile);
-  DCHECK(registry);
-  DCHECK(!extension_registry_observations_.IsObservingSource(registry));
+  CHECK(registry, base::NotFatalUntil::M161);
+  CHECK(!extension_registry_observations_.IsObservingSource(registry),
+        base::NotFatalUntil::M161);
   extension_registry_observations_.AddObservation(registry);
 }
 
@@ -231,8 +240,9 @@ void UserScriptListener::OnExtensionLoaded(
     const Extension* extension) {
   URLPatterns new_patterns;
   CollectURLPatterns(browser_context, extension, &new_patterns);
-  if (new_patterns.empty())
+  if (new_patterns.empty()) {
     return;  // No new patterns from this extension.
+  }
 
   AppendNewURLPatterns(browser_context, new_patterns);
 }
@@ -243,9 +253,10 @@ void UserScriptListener::OnExtensionUnloaded(
     UnloadedExtensionReason reason) {
   // It's possible to unload extensions before loading extensions when the
   // ExtensionService uninstalls an orphaned extension. In this case we don't
-  // need to update |profile_data_|. See crbug.com/1036028
-  if (profile_data_.count(browser_context) == 0)
+  // need to update |profile_data_|. See crbug.com/40664533
+  if (profile_data_.count(browser_context) == 0) {
     return;
+  }
 
   // TODO(crbug.com/40206239): These patterns may have changed since the
   // extension was loaded as they are associated with dynamic scripts. Once this
@@ -266,8 +277,9 @@ void UserScriptListener::OnExtensionUnloaded(
   URLPatterns new_patterns;
   for (ExtensionSet::const_iterator it = extensions.begin();
        it != extensions.end(); ++it) {
-    if (it->get() != extension)
+    if (it->get() != extension) {
       CollectURLPatterns(browser_context, it->get(), &new_patterns);
+    }
   }
   ReplaceURLPatterns(browser_context, new_patterns);
 }

@@ -62,10 +62,10 @@ export const CrSelectableMixin = <T extends Constructor<CrLitElement>>(
       };
     }
 
-    attrForSelected: string|null = null;
-    selectable?: string;
-    selected?: string|number;
-    selectedAttribute: string|null = null;
+    accessor attrForSelected: string|null = null;
+    accessor selectable: string|undefined;
+    accessor selected: string|number|undefined;
+    accessor selectedAttribute: string|null = null;
 
     // Whether to select items when they or their children are clicked. Note:
     // value is only checked in firstUpdated().
@@ -73,14 +73,6 @@ export const CrSelectableMixin = <T extends Constructor<CrLitElement>>(
 
     private items_: Element[] = [];
     private selectedItem_: Element|null = null;
-
-    override firstUpdated(changedProperties: PropertyValues<this>) {
-      super.firstUpdated(changedProperties);
-      if (this.selectOnClick) {
-        this.addEventListener('click', e => this.onClick_(e));
-      }
-      this.observeItems();
-    }
 
     // Override this method in client code to modify the observation logic,
     // or to turn it off completely. By default it listens for any changes on
@@ -105,6 +97,14 @@ export const CrSelectableMixin = <T extends Constructor<CrLitElement>>(
           this.selected = value;
         }
       }
+    }
+
+    override firstUpdated(changedProperties: PropertyValues<this>) {
+      super.firstUpdated(changedProperties);
+      if (this.selectOnClick) {
+        this.addEventListener('click', e => this.onClick_(e));
+      }
+      this.observeItems();
     }
 
     override updated(changedProperties: PropertyValues<this>) {
@@ -148,7 +148,7 @@ export const CrSelectableMixin = <T extends Constructor<CrLitElement>>(
     }
 
     getSlot(): HTMLSlotElement {
-      const slot = this.shadowRoot!.querySelector('slot');
+      const slot = this.shadowRoot.querySelector('slot');
       assert(slot);
       return slot;
     }

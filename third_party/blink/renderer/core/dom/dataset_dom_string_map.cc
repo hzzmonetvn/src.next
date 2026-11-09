@@ -29,34 +29,33 @@
 #include "third_party/blink/renderer/core/dom/element.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
 #include "third_party/blink/renderer/platform/wtf/text/ascii_ctype.h"
+#include "third_party/blink/renderer/platform/wtf/text/character_visitor.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 
 namespace blink {
 
 static bool IsValidAttributeName(const String& name) {
-  if (!name.StartsWith("data-"))
+  if (!name.starts_with("data-")) {
     return false;
-
-  unsigned length = name.length();
-  for (unsigned i = 5; i < length; ++i) {
-    if (IsASCIIUpper(name[i]))
-      return false;
   }
 
-  return true;
+  // "data-" itself contains no ASCII upper characters, so checking the whole
+  // name is equivalent to checking only the part after the prefix.
+  return name.ContainsNoAsciiUpper();
 }
 
-static String ConvertAttributeNameToPropertyName(const String& name) {
+template <typename CharType>
+static String ConvertAttributeNameToPropertyName(
+    base::span<const CharType> characters) {
   StringBuilder string_builder;
 
-  unsigned length = name.length();
-  for (unsigned i = 5; i < length; ++i) {
-    UChar character = name[i];
+  for (size_t i = 5; i < characters.size(); ++i) {
+    CharType character = characters[i];
     if (character != '-') {
       string_builder.Append(character);
     } else {
-      if ((i + 1 < length) && IsASCIILower(name[i + 1])) {
-        string_builder.Append(ToASCIIUpper(name[i + 1]));
+      if ((i + 1 < characters.size()) && IsAsciiLower(characters[i + 1])) {
+        string_builder.Append(ToAsciiUpper(characters[i + 1]));
         ++i;
       } else {
         string_builder.Append(character);
@@ -65,6 +64,12 @@ static String ConvertAttributeNameToPropertyName(const String& name) {
   }
 
   return string_builder.ReleaseString();
+}
+
+static String ConvertAttributeNameToPropertyName(const String& name) {
+  return VisitCharacters(name, [](auto chars) {
+    return ConvertAttributeNameToPropertyName(chars);
+  });
 }
 
 template <typename CharType1, typename CharType2>
@@ -77,11 +82,11 @@ static bool PropertyNameMatchesAttributeName(
   while (a < attribute_name.size() && p < property_name.size()) {
     const CharType2 current_attribute_char = attribute_name[a];
     if (current_attribute_char == '-' && a + 1 < attribute_name.size() &&
-        IsASCIILower(attribute_name[a + 1])) {
+        IsAsciiLower(attribute_name[a + 1])) {
       word_boundary = true;
     } else {
       const CharType2 current_attribute_char_to_compare =
-          word_boundary ? ToASCIIUpper(current_attribute_char)
+          word_boundary ? ToAsciiUpper(current_attribute_char)
                         : current_attribute_char;
       if (current_attribute_char_to_compare != property_name[p]) {
         return false;
@@ -97,8 +102,9 @@ static bool PropertyNameMatchesAttributeName(
 
 static bool PropertyNameMatchesAttributeName(const String& property_name,
                                              const String& attribute_name) {
-  if (!attribute_name.StartsWith("data-"))
+  if (!attribute_name.starts_with("data-")) {
     return false;
+  }
 
   if (property_name.Is8Bit()) {
     if (attribute_name.Is8Bit()) {
@@ -117,13 +123,38 @@ static bool PropertyNameMatchesAttributeName(const String& property_name,
                                           attribute_name.Span16());
 }
 
-static bool IsValidPropertyName(const String& name) {
-  unsigned length = name.length();
-  for (unsigned i = 0; i < length; ++i) {
-    if (name[i] == '-' && (i + 1 < length) && IsASCIILower(name[i + 1]))
+template <typename CharType>
+static bool IsValidPropertyName(base::span<const CharType> characters) {
+  for (size_t i = 0; i < characters.size(); ++i) {
+    if (characters[i] == '-' && (i + 1 < characters.size()) &&
+        IsAsciiLower(characters[i + 1])) {
       return false;
+    }
   }
   return true;
+}
+
+static bool IsValidPropertyName(const String& name) {
+  if (name.empty()) {
+    return true;
+  }
+  return VisitCharacters(
+      name, [](auto chars) { return IsValidPropertyName(chars); });
+}
+
+template <typename CharType>
+static void ConvertPropertyNameToAttributeName(
+    base::span<const CharType> characters,
+    StringBuilder& builder) {
+  for (size_t i = 0; i < characters.size(); ++i) {
+    CharType character = characters[i];
+    if (IsAsciiUpper(character)) {
+      builder.Append('-');
+      builder.Append(ToAsciiLower(character));
+    } else {
+      builder.Append(character);
+    }
+  }
 }
 
 // This returns an AtomicString because attribute names are always stored
@@ -131,18 +162,11 @@ static bool IsValidPropertyName(const String& name) {
 static AtomicString ConvertPropertyNameToAttributeName(const String& name) {
   StringBuilder builder;
   builder.Append("data-");
-
-  unsigned length = name.length();
-  for (unsigned i = 0; i < length; ++i) {
-    UChar character = name[i];
-    if (IsASCIIUpper(character)) {
-      builder.Append('-');
-      builder.Append(ToASCIILower(character));
-    } else {
-      builder.Append(character);
-    }
+  if (!name.empty()) {
+    VisitCharacters(name, [&builder](auto chars) {
+      ConvertPropertyNameToAttributeName(chars, builder);
+    });
   }
-
   return builder.ToAtomicString();
 }
 
@@ -179,7 +203,7 @@ void DatasetDOMStringMap::SetItem(const String& name,
   if (!IsValidPropertyName(name)) {
     exception_state.ThrowDOMException(
         DOMExceptionCode::kSyntaxError,
-        "'" + name + "' is not a valid property name.");
+        StrCat({"'", name, "' is not a valid property name."}));
     return;
   }
 
@@ -200,7 +224,7 @@ bool DatasetDOMStringMap::DeleteItem(const String& name) {
 
 void DatasetDOMStringMap::Trace(Visitor* visitor) const {
   visitor->Trace(element_);
-  ElementRareDataField::Trace(visitor);
+  NodeRareDataField::Trace(visitor);
   DOMStringMap::Trace(visitor);
 }
 

@@ -4,30 +4,23 @@
 
 #include "chrome/browser/extensions/extension_action_runner.h"
 
+#include <algorithm>
 #include <memory>
 #include <tuple>
 #include <vector>
 
 #include "base/auto_reset.h"
-#include "base/containers/contains.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/location.h"
-#include "base/metrics/histogram_macros.h"
-#include "base/ranges/algorithm.h"
+#include "base/notimplemented.h"
 #include "base/task/single_thread_task_runner.h"
 #include "chrome/browser/extensions/api/side_panel/side_panel_service.h"
 #include "chrome/browser/extensions/extension_action_dispatcher.h"
 #include "chrome/browser/extensions/extension_tab_util.h"
-#include "chrome/browser/extensions/permissions/active_tab_permission_granter.h"
-#include "chrome/browser/extensions/permissions/permissions_updater.h"
-#include "chrome/browser/extensions/permissions/scripting_permissions_modifier.h"
-#include "chrome/browser/extensions/permissions/site_permissions_helper.h"
 #include "chrome/browser/extensions/tab_helper.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser_finder.h"
-#include "chrome/browser/ui/browser_window.h"
-#include "chrome/browser/ui/extensions/extensions_dialogs.h"
+#include "chrome/browser/ui/extensions/reload_page_dialog_controller.h"
 #include "chrome/browser/ui/toolbar/toolbar_actions_model.h"
 #include "components/crx_file/id_util.h"
 #include "components/sessions/content/session_tab_helper.h"
@@ -41,7 +34,13 @@
 #include "extensions/browser/api/declarative_net_request/rules_monitor_service.h"
 #include "extensions/browser/extension_action.h"
 #include "extensions/browser/extension_action_manager.h"
+#include "extensions/browser/permissions/active_tab_permission_granter.h"
+#include "extensions/browser/permissions/permissions_updater.h"
+#include "extensions/browser/permissions/scripting_permissions_modifier.h"
+#include "extensions/browser/permissions/site_permissions_helper.h"
 #include "extensions/browser/permissions_manager.h"
+#include "extensions/browser/script_injection_tracker.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/api/extension_action/action_info.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/extension_id.h"
@@ -50,45 +49,38 @@
 #include "extensions/common/permissions/permission_set.h"
 #include "extensions/common/permissions/permissions_data.h"
 #include "url/origin.h"
+#include "url/url_constants.h"
 
-namespace {
+#if !BUILDFLAG(IS_ANDROID)
+#include "chrome/browser/ui/browser_window.h"
+#endif
 
-std::vector<extensions::ExtensionId> GetExtensionIds(
-    std::vector<const extensions::Extension*> extensions) {
-  std::vector<extensions::ExtensionId> extension_ids;
-  extension_ids.reserve(extensions.size());
-  for (auto* extension : extensions) {
-    extension_ids.push_back(extension->id());
-  }
-  return extension_ids;
-}
-
-}  // namespace
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
 ExtensionActionRunner::PendingScript::PendingScript(
+    content::RenderFrameHost* frame,
+    mojom::InjectionType script_type,
     mojom::RunLocation run_location,
     ScriptInjectionCallback permit_script)
-    : run_location(run_location), permit_script(std::move(permit_script)) {}
+    : frame_id(frame ? frame->GetGlobalId()
+                     : content::GlobalRenderFrameHostId()),
+      script_type(script_type),
+      run_location(run_location),
+      permit_script(std::move(permit_script)) {}
 
 ExtensionActionRunner::PendingScript::~PendingScript() = default;
 
 ExtensionActionRunner::ExtensionActionRunner(content::WebContents* web_contents)
     : content::WebContentsObserver(web_contents),
-      num_page_requests_(0),
-      browser_context_(web_contents->GetBrowserContext()),
-      was_used_on_page_(false),
-      ignore_active_tab_granted_(false),
-      test_observer_(nullptr) {
+      browser_context_(web_contents->GetBrowserContext()) {
   CHECK(web_contents);
   extension_registry_observation_.Observe(
       ExtensionRegistry::Get(browser_context_));
 }
 
-ExtensionActionRunner::~ExtensionActionRunner() {
-  LogUMA();
-}
+ExtensionActionRunner::~ExtensionActionRunner() = default;
 
 // static
 ExtensionActionRunner* ExtensionActionRunner::GetForWebContents(
@@ -160,9 +152,8 @@ ExtensionAction::ShowAction ExtensionActionRunner::RunAction(
 // it's more about permissions than running an action.
 void ExtensionActionRunner::GrantTabPermissions(
     const std::vector<const Extension*>& extensions) {
-  SitePermissionsHelper permissions_helper(
-      Profile::FromBrowserContext(browser_context_));
-  bool refresh_required = base::ranges::any_of(
+  SitePermissionsHelper permissions_helper(browser_context_);
+  bool refresh_required = std::ranges::any_of(
       extensions, [this, &permissions_helper](const Extension* extension) {
         return permissions_helper.PageNeedsRefreshToRun(
             GetBlockedActions(extension->id()));
@@ -170,13 +161,13 @@ void ExtensionActionRunner::GrantTabPermissions(
 
   // If a refresh is required this prevents blocked actions (that wouldn't run
   // at the right time) from running until the user refreshes the page.
-  base::AutoReset<bool> ignore_active_tab(&ignore_active_tab_granted_,
-                                          refresh_required);
   // Immediately grant permissions to every extension.
+  auto* granter = ActiveTabPermissionGranter::FromWebContents(web_contents());
   for (auto* extension : extensions) {
-    TabHelper::FromWebContents(web_contents())
-        ->active_tab_permission_granter()
-        ->GrantIfRequested(extension);
+    if (refresh_required && !granter->IsGranted(extension)) {
+      extensions_to_ignore_active_tab_granted_.insert(extension->id());
+    }
+    granter->GrantIfRequested(extension);
   }
 
   if (!refresh_required) {
@@ -188,19 +179,18 @@ void ExtensionActionRunner::GrantTabPermissions(
   // hasn't been refreshed yet.
   const GURL& url = web_contents()->GetLastCommittedURL();
   auto* permissions_manager = PermissionsManager::Get(browser_context_);
-  DCHECK(base::ranges::all_of(
+  DCHECK(std::ranges::all_of(
       extensions, [url, &permissions_manager](const Extension* extension) {
         return permissions_manager->GetUserSiteAccess(*extension, url) ==
                PermissionsManager::UserSiteAccess::kOnClick;
       }));
 
-  std::vector<ExtensionId> extension_ids = GetExtensionIds(extensions);
-  ShowReloadPageBubble(extension_ids);
+  ShowReloadPageBubble(extensions);
 }
 
 void ExtensionActionRunner::OnActiveTabPermissionGranted(
     const Extension* extension) {
-  if (ignore_active_tab_granted_) {
+  if (extensions_to_ignore_active_tab_granted_.erase(extension->id())) {
     return;
   }
 
@@ -217,8 +207,8 @@ void ExtensionActionRunner::OnWebRequestBlocked(const Extension* extension) {
     NotifyChange(extension);
   }
 
-  if (test_observer_) {
-    test_observer_->OnBlockedActionAdded();
+  for (TestObserver& observer : test_observers_) {
+    observer.OnBlockedActionAdded();
   }
 }
 
@@ -256,14 +246,14 @@ bool ExtensionActionRunner::WantsToRun(const Extension* extension) {
 
 void ExtensionActionRunner::RunForTesting(const Extension* extension) {
   if (WantsToRun(extension)) {
-    TabHelper::FromWebContents(web_contents())
-        ->active_tab_permission_granter()
+    ActiveTabPermissionGranter::FromWebContents(web_contents())
         ->GrantIfRequested(extension);
   }
 }
 
 PermissionsData::PageAccess
 ExtensionActionRunner::RequiresUserConsentForScriptInjection(
+    content::RenderFrameHost* render_frame_host,
     const Extension* extension,
     mojom::InjectionType type) {
   CHECK(extension);
@@ -273,13 +263,22 @@ ExtensionActionRunner::RequiresUserConsentForScriptInjection(
     return PermissionsData::PageAccess::kAllowed;
   }
 
-  GURL url = web_contents()->GetVisibleURL();
+  GURL url = render_frame_host ? render_frame_host->GetLastCommittedURL()
+                               : web_contents()->GetLastCommittedURL();
+  if (render_frame_host &&
+      (url.is_empty() || url.SchemeIs(url::kAboutScheme))) {
+    url = render_frame_host->GetLastCommittedOrigin().GetURL();
+  }
   int tab_id = sessions::SessionTabHelper::IdForTab(web_contents()).id();
   switch (type) {
     case mojom::InjectionType::kContentScript:
       return extension->permissions_data()->GetContentScriptAccess(url, tab_id,
                                                                    nullptr);
     case mojom::InjectionType::kProgrammaticScript:
+    // Declarative scripts are gated on the extension's host permissions rather
+    // than its manifest content script matches, the same as
+    // `RequestContentScript::InstructRenderProcessToInject()`.
+    case mojom::InjectionType::kDeclarativeScript:
       return extension->permissions_data()->GetPageAccess(url, tab_id, nullptr);
   }
 
@@ -288,12 +287,14 @@ ExtensionActionRunner::RequiresUserConsentForScriptInjection(
 
 void ExtensionActionRunner::RequestScriptInjection(
     const Extension* extension,
+    content::RenderFrameHost* render_frame_host,
+    mojom::InjectionType script_type,
     mojom::RunLocation run_location,
     ScriptInjectionCallback callback) {
   CHECK(extension);
   PendingScriptList& list = pending_scripts_[extension->id()];
-  list.push_back(
-      std::make_unique<PendingScript>(run_location, std::move(callback)));
+  list.push_back(std::make_unique<PendingScript>(
+      render_frame_host, script_type, run_location, std::move(callback)));
 
   // If this was the first entry, we need to notify that a new extension wants
   // to run.
@@ -301,10 +302,8 @@ void ExtensionActionRunner::RequestScriptInjection(
     NotifyChange(extension);
   }
 
-  was_used_on_page_ = true;
-
-  if (test_observer_) {
-    test_observer_->OnBlockedActionAdded();
+  for (TestObserver& observer : test_observers_) {
+    observer.OnBlockedActionAdded();
   }
 }
 
@@ -335,19 +334,35 @@ void ExtensionActionRunner::RunPendingScriptsForExtension(
   iter->second.swap(scripts);
   pending_scripts_.erase(extension->id());
 
-  // Run all pending injections for the given extension.
-  RunCallbackOnPendingScript(scripts, true);
+  for (const auto& script : scripts) {
+    content::RenderFrameHost* frame = nullptr;
+    bool is_allowed = false;
+    if (script->frame_id) {
+      frame = content::RenderFrameHost::FromID(script->frame_id);
+      is_allowed = frame && (RequiresUserConsentForScriptInjection(
+                                 frame, extension, script->script_type) ==
+                             PermissionsData::PageAccess::kAllowed);
+    } else {
+      is_allowed = RequiresUserConsentForScriptInjection(nullptr, extension,
+                                                         script->script_type) ==
+                   PermissionsData::PageAccess::kAllowed;
+    }
+
+    if (is_allowed && frame) {
+      ScriptInjectionTracker::WillExecuteCode(
+          base::PassKey<ExtensionActionRunner>(), script->script_type, frame,
+          *extension);
+    }
+    std::move(script->permit_script).Run(is_allowed);
+  }
 }
 
 void ExtensionActionRunner::OnRequestScriptInjectionPermission(
+    content::RenderFrameHost* render_frame_host,
     const ExtensionId& extension_id,
     mojom::InjectionType script_type,
     mojom::RunLocation run_location,
     mojom::LocalFrameHost::RequestScriptInjectionPermissionCallback callback) {
-  if (!crx_file::id_util::IdIsValid(extension_id)) {
-    NOTREACHED() << "'" << extension_id << "' is not a valid id.";
-  }
-
   const Extension* extension = ExtensionRegistry::Get(browser_context_)
                                    ->enabled_extensions()
                                    .GetByID(extension_id);
@@ -360,12 +375,22 @@ void ExtensionActionRunner::OnRequestScriptInjectionPermission(
 
   ++num_page_requests_;
 
-  switch (RequiresUserConsentForScriptInjection(extension, script_type)) {
+  switch (RequiresUserConsentForScriptInjection(render_frame_host, extension,
+                                                script_type)) {
     case PermissionsData::PageAccess::kAllowed:
+      // Ensure the tracker is updated if the permission was granted after the
+      // injection was initially dispatched by ScriptExecutor or if it became
+      // allowed dynamically.
+      if (render_frame_host) {
+        ScriptInjectionTracker::WillExecuteCode(
+            base::PassKey<ExtensionActionRunner>(), script_type,
+            render_frame_host, *extension);
+      }
       std::move(callback).Run(true);
       break;
     case PermissionsData::PageAccess::kWithheld:
-      RequestScriptInjection(extension, run_location, std::move(callback));
+      RequestScriptInjection(extension, render_frame_host, script_type,
+                             run_location, std::move(callback));
       break;
     case PermissionsData::PageAccess::kDenied:
       std::move(callback).Run(false);
@@ -374,6 +399,14 @@ void ExtensionActionRunner::OnRequestScriptInjectionPermission(
       // "no"). Just let the request fizzle and die.
       break;
   }
+}
+
+void ExtensionActionRunner::AddObserver(TestObserver* observer) {
+  test_observers_.AddObserver(observer);
+}
+
+void ExtensionActionRunner::RemoveObserver(TestObserver* observer) {
+  test_observers_.RemoveObserver(observer);
 }
 
 void ExtensionActionRunner::NotifyChange(const Extension* extension) {
@@ -389,63 +422,22 @@ void ExtensionActionRunner::NotifyChange(const Extension* extension) {
   }
 }
 
-void ExtensionActionRunner::LogUMA() const {
-  // We only log the permitted extensions metric if the feature was used at all
-  // on the page, because otherwise the data will be boring.
-  if (was_used_on_page_) {
-    UMA_HISTOGRAM_COUNTS_100(
-        "Extensions.ActiveScriptController.PermittedExtensions",
-        permitted_extensions_.size());
-    UMA_HISTOGRAM_COUNTS_100(
-        "Extensions.ActiveScriptController.DeniedExtensions",
-        pending_scripts_.size());
-  }
-}
-
 void ExtensionActionRunner::ShowReloadPageBubble(
-    const std::vector<ExtensionId>& extension_ids) {
-  // For testing, simulate the bubble being accepted by directly invoking the
-  // callback, or rejected by skipping the callback.
-  if (accept_bubble_for_testing_.has_value()) {
-    if (*accept_bubble_for_testing_) {
-      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-          FROM_HERE,
-          base::BindOnce(&ExtensionActionRunner::OnReloadPageBubbleAccepted,
-                         weak_factory_.GetWeakPtr()));
-    }
-    return;
-  }
-
-  // TODO(emiliapaz): Consider showing the dialog as a modal if container
-  // doesn't exist. Currently we get the extension's icon via the action
-  // controller from the container, so the container must exist.
-  Browser* browser = chrome::FindBrowserWithTab(web_contents());
-  ExtensionsContainer* const extensions_container =
-      browser ? browser->window()->GetExtensionsContainer() : nullptr;
-  if (!extensions_container) {
-    return;
-  }
-
-  ShowReloadPageDialog(
-      browser, extension_ids,
-      base::BindOnce(&ExtensionActionRunner::OnReloadPageBubbleAccepted,
-                     weak_factory_.GetWeakPtr()));
-}
-
-void ExtensionActionRunner::OnReloadPageBubbleAccepted() {
-  web_contents()->GetController().Reload(content::ReloadType::NORMAL, false);
+    const std::vector<const Extension*>& extensions) {
+  reload_page_dialog_controller_ = std::make_unique<ReloadPageDialogController>(
+      web_contents(), browser_context_);
+  reload_page_dialog_controller_->TriggerShow(extensions);
 }
 
 void ExtensionActionRunner::RunBlockedActions(const Extension* extension) {
-  DCHECK(base::Contains(pending_scripts_, extension->id()) ||
+  DCHECK(pending_scripts_.contains(extension->id()) ||
          web_request_blocked_.count(extension->id()) != 0);
 
   // Clicking to run the extension counts as granting it permission to run on
   // the given tab.
   // The extension may already have active tab at this point, but granting
   // it twice is essentially a no-op.
-  TabHelper::FromWebContents(web_contents())
-      ->active_tab_permission_granter()
+  ActiveTabPermissionGranter::FromWebContents(web_contents())
       ->GrantIfRequested(extension);
 
   RunPendingScriptsForExtension(extension);
@@ -469,7 +461,6 @@ void ExtensionActionRunner::DidFinishNavigation(
     return;
   }
 
-  LogUMA();
   num_page_requests_ = 0;
   permitted_extensions_.clear();
   // Runs all pending callbacks before clearing them.
@@ -478,8 +469,7 @@ void ExtensionActionRunner::DidFinishNavigation(
   }
   pending_scripts_.clear();
   web_request_blocked_.clear();
-  was_used_on_page_ = false;
-  weak_factory_.InvalidateWeakPtrs();
+  extensions_to_ignore_active_tab_granted_.clear();
 
   // Note: This needs to be called *after* the maps have been updated, so that
   // when the UI updates, this object returns the proper result for "wants to
@@ -498,8 +488,10 @@ void ExtensionActionRunner::DidFinishNavigation(
 
 void ExtensionActionRunner::WebContentsDestroyed() {
   ExtensionActionDispatcher::Get(browser_context_)
-      ->ClearAllValuesForTab(web_contents());
+      ->ClearAllValuesForTab(web_contents(),
+                             /*web_contents_being_destroyed=*/true);
 
+  int tab_id = ExtensionTabUtil::GetTabId(web_contents());
   declarative_net_request::RulesMonitorService* rules_monitor_service =
       declarative_net_request::RulesMonitorService::Get(browser_context_);
 
@@ -508,7 +500,6 @@ void ExtensionActionRunner::WebContentsDestroyed() {
     declarative_net_request::ActionTracker& action_tracker =
         rules_monitor_service->action_tracker();
 
-    int tab_id = ExtensionTabUtil::GetTabId(web_contents());
     action_tracker.ClearTabData(tab_id);
   }
 }

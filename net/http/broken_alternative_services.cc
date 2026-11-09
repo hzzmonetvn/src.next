@@ -4,11 +4,14 @@
 
 #include "net/http/broken_alternative_services.h"
 
-#include "base/containers/adapters.h"
+#include <ranges>
+
+#include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/memory/singleton.h"
 #include "base/time/tick_clock.h"
 #include "base/time/time.h"
+#include "net/base/features.h"
 #include "net/http/http_server_properties.h"
 
 namespace net {
@@ -23,16 +26,16 @@ constexpr base::TimeDelta kDefaultBrokenAlternativeProtocolDelay =
 // Given the shortest broken delay is 1s, limit binary shift to limit delay to
 // approximately 2 days.
 const int kBrokenDelayMaxShift = 18;
-// Lower and upper limits of broken alternative service delay.
+// Lower limit of broken alternative service delay.
 constexpr base::TimeDelta kMinBrokenAlternativeProtocolDelay = base::Seconds(1);
-constexpr base::TimeDelta kMaxBrokenAlternativeProtocolDelay = base::Days(2);
 
 base::TimeDelta ComputeBrokenAlternativeServiceExpirationDelay(
     int broken_count,
     base::TimeDelta initial_delay,
+    base::TimeDelta max_delay,
     bool exponential_backoff_on_initial_delay) {
   DCHECK_GE(broken_count, 0);
-  // Make sure initial delay is within [1s, 300s].
+
   if (initial_delay < kMinBrokenAlternativeProtocolDelay) {
     initial_delay = kMinBrokenAlternativeProtocolDelay;
   }
@@ -47,12 +50,17 @@ base::TimeDelta ComputeBrokenAlternativeServiceExpirationDelay(
     broken_count = kBrokenDelayMaxShift;
   }
   base::TimeDelta delay;
-  if (exponential_backoff_on_initial_delay) {
+  // If the initialDelay flag is on then the first codepath will
+  // always be taken as the other codepath will be deleted if the experiment is
+  // successful.
+  if (exponential_backoff_on_initial_delay ||
+      base::FeatureList::IsEnabled(
+          features::kInitialDelayForBrokenAlternativeService)) {
     delay = initial_delay * (1 << broken_count);
   } else {
     delay = kDefaultBrokenAlternativeProtocolDelay * (1 << (broken_count - 1));
   }
-  return std::min(delay, kMaxBrokenAlternativeProtocolDelay);
+  return std::min(delay, max_delay);
 }
 
 }  // namespace
@@ -82,7 +90,9 @@ BrokenAlternativeServices::BrokenAlternativeServices(
       clock_(clock),
       recently_broken_alternative_services_(
           max_recently_broken_alternative_service_entries),
-      initial_delay_(kDefaultBrokenAlternativeProtocolDelay) {
+      initial_delay_(
+          features::kInitialDelayForBrokenAlternativeServiceParam.Get()),
+      max_delay_(features::kMaxDelayForBrokenAlternativeServiceParam.Get()) {
   DCHECK(delegate_);
   DCHECK(clock_);
 }
@@ -99,7 +109,7 @@ void BrokenAlternativeServices::Clear() {
 void BrokenAlternativeServices::MarkBrokenUntilDefaultNetworkChanges(
     const BrokenAlternativeService& broken_alternative_service) {
   DCHECK(!broken_alternative_service.alternative_service.host.empty());
-  DCHECK_NE(kProtoUnknown,
+  DCHECK_NE(NextProto::kProtoUnknown,
             broken_alternative_service.alternative_service.protocol);
 
   // The brokenness will expire on the default network change or based on
@@ -122,7 +132,7 @@ void BrokenAlternativeServices::MarkBrokenImpl(
     const BrokenAlternativeService& broken_alternative_service) {
   // Empty host means use host of origin, callers are supposed to substitute.
   DCHECK(!broken_alternative_service.alternative_service.host.empty());
-  DCHECK_NE(kProtoUnknown,
+  DCHECK_NE(NextProto::kProtoUnknown,
             broken_alternative_service.alternative_service.protocol);
 
   auto it =
@@ -134,9 +144,9 @@ void BrokenAlternativeServices::MarkBrokenImpl(
     broken_count = it->second++;
   }
   base::TimeTicks expiration =
-      clock_->NowTicks() +
-      ComputeBrokenAlternativeServiceExpirationDelay(
-          broken_count, initial_delay_, exponential_backoff_on_initial_delay_);
+      clock_->NowTicks() + ComputeBrokenAlternativeServiceExpirationDelay(
+                               broken_count, initial_delay_, max_delay_,
+                               exponential_backoff_on_initial_delay_);
   // Return if alternative service is already in expiration queue.
   BrokenAlternativeServiceList::iterator list_it;
   if (!AddToBrokenListAndMap(broken_alternative_service, expiration,
@@ -154,7 +164,7 @@ void BrokenAlternativeServices::MarkBrokenImpl(
 
 void BrokenAlternativeServices::MarkRecentlyBroken(
     const BrokenAlternativeService& broken_alternative_service) {
-  DCHECK_NE(kProtoUnknown,
+  DCHECK_NE(NextProto::kProtoUnknown,
             broken_alternative_service.alternative_service.protocol);
   if (recently_broken_alternative_services_.Get(broken_alternative_service) ==
       recently_broken_alternative_services_.end()) {
@@ -198,7 +208,7 @@ bool BrokenAlternativeServices::WasRecentlyBroken(
 
 void BrokenAlternativeServices::Confirm(
     const BrokenAlternativeService& broken_alternative_service) {
-  DCHECK_NE(kProtoUnknown,
+  DCHECK_NE(NextProto::kProtoUnknown,
             broken_alternative_service.alternative_service.protocol);
 
   // Remove |broken_alternative_service| from
@@ -252,7 +262,7 @@ void BrokenAlternativeServices::SetBrokenAndRecentlyBrokenAlternativeServices(
   // Add back all existing recently broken alt svcs to cache so they're at
   // front of recency list (LRUCache::Get() does this automatically).
   for (const auto& [service, broken_count] :
-       base::Reversed(*recently_broken_alternative_services)) {
+       std::views::reverse(*recently_broken_alternative_services)) {
     if (recently_broken_alternative_services_.Get(service) ==
         recently_broken_alternative_services_.end()) {
       recently_broken_alternative_services_.Put(service, broken_count);
@@ -317,6 +327,11 @@ void BrokenAlternativeServices::SetBrokenAndRecentlyBrokenAlternativeServices(
 void BrokenAlternativeServices::SetDelayParams(
     std::optional<base::TimeDelta> initial_delay,
     std::optional<bool> exponential_backoff_on_initial_delay) {
+  // Disallow overriding values when the experiment is enabled.
+  if (base::FeatureList::IsEnabled(
+          features::kInitialDelayForBrokenAlternativeService)) {
+    return;
+  }
   if (initial_delay.has_value()) {
     initial_delay_ = initial_delay.value();
   }

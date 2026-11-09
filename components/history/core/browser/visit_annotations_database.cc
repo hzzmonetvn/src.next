@@ -4,11 +4,15 @@
 
 #include "components/history/core/browser/visit_annotations_database.h"
 
+#include <algorithm>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
+#include "base/check.h"
+#include "base/containers/flat_map.h"
 #include "base/logging.h"
-#include "base/ranges/algorithm.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "components/history/core/browser/history_types.h"
@@ -185,6 +189,34 @@ ClusterVisit::InteractionState InteractionStateFromInt(int state) {
   return ClusterVisit::InteractionState::kDefault;
 }
 
+void ReadVisitContentAnnotations(
+    sql::Statement& statement,
+    VisitContentAnnotations* out_content_annotations) {
+  CHECK(out_content_annotations);
+  out_content_annotations->model_annotations.visibility_score =
+      static_cast<float>(statement.ColumnDouble(1));
+  out_content_annotations->model_annotations.categories =
+      VisitAnnotationsDatabase::GetCategoriesFromStringColumn(
+          statement.ColumnStringView(2));
+  out_content_annotations->model_annotations.page_topics_model_version =
+      statement.ColumnInt64(3);
+  out_content_annotations->annotation_flags = statement.ColumnInt64(4);
+  out_content_annotations->model_annotations.entities =
+      VisitAnnotationsDatabase::GetCategoriesFromStringColumn(
+          statement.ColumnStringView(5));
+  out_content_annotations->related_searches =
+      VisitAnnotationsDatabase::DeserializeFromStringColumn(
+          statement.ColumnStringView(6));
+  out_content_annotations->search_normalized_url =
+      GURL(statement.ColumnStringView(7));
+  out_content_annotations->search_terms = statement.ColumnString16(8);
+  out_content_annotations->alternative_title = statement.ColumnString(9);
+  out_content_annotations->page_language = statement.ColumnString(10);
+  out_content_annotations->password_state =
+      PasswordStateFromInt(statement.ColumnInt(11));
+  out_content_annotations->has_url_keyed_image = statement.ColumnBool(12);
+}
+
 }  // namespace
 
 VisitAnnotationsDatabase::VisitAnnotationsDatabase() = default;
@@ -326,11 +358,11 @@ void VisitAnnotationsDatabase::AddContextAnnotationsForVisit(
       ")VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"));
   statement.BindInt64(0, visit_id);
   statement.BindInt64(1, ContextAnnotationsToFlags(visit_context_annotations));
-  statement.BindInt64(
-      2, visit_context_annotations.duration_since_last_visit.InMicroseconds());
+  statement.BindTimeDelta(2,
+                          visit_context_annotations.duration_since_last_visit);
   statement.BindInt(3, visit_context_annotations.page_end_reason);
-  statement.BindInt64(
-      4, visit_context_annotations.total_foreground_duration.InMicroseconds());
+  statement.BindTimeDelta(4,
+                          visit_context_annotations.total_foreground_duration);
   statement.BindInt(
       5, BrowserTypeToInt(visit_context_annotations.on_visit.browser_type));
   statement.BindInt(6, visit_context_annotations.on_visit.window_id.id());
@@ -408,11 +440,11 @@ void VisitAnnotationsDatabase::UpdateContextAnnotationsForVisit(
                                  "response_code=? "
                                  "WHERE visit_id=?"));
   statement.BindInt64(0, ContextAnnotationsToFlags(visit_context_annotations));
-  statement.BindInt64(
-      1, visit_context_annotations.duration_since_last_visit.InMicroseconds());
+  statement.BindTimeDelta(1,
+                          visit_context_annotations.duration_since_last_visit);
   statement.BindInt(2, visit_context_annotations.page_end_reason);
-  statement.BindInt64(
-      3, visit_context_annotations.total_foreground_duration.InMicroseconds());
+  statement.BindTimeDelta(3,
+                          visit_context_annotations.total_foreground_duration);
   statement.BindInt(
       4, BrowserTypeToInt(visit_context_annotations.on_visit.browser_type));
   statement.BindInt(5, visit_context_annotations.on_visit.window_id.id());
@@ -452,8 +484,8 @@ bool VisitAnnotationsDatabase::GetContextAnnotationsForVisit(
   // The `VisitID` in column 0 is intentionally ignored, as it's not part of
   // `VisitContextAnnotations`.
   *out_context_annotations = ConstructContextAnnotationsWithFlags(
-      statement.ColumnInt64(1), base::Microseconds(statement.ColumnInt64(2)),
-      statement.ColumnInt(3), base::Microseconds(statement.ColumnInt64(4)),
+      statement.ColumnInt64(1), statement.ColumnTimeDelta(2),
+      statement.ColumnInt(3), statement.ColumnTimeDelta(4),
       statement.ColumnInt(5),
       SessionID::FromSerializedValue(statement.ColumnInt(6)),
       SessionID::FromSerializedValue(statement.ColumnInt(7)),
@@ -473,31 +505,70 @@ bool VisitAnnotationsDatabase::GetContentAnnotationsForVisit(
                      "FROM content_annotations WHERE visit_id=?"));
   statement.BindInt64(0, visit_id);
 
-  if (!statement.Step())
+  if (!statement.Step()) {
     return false;
+  }
 
   VisitID received_visit_id = statement.ColumnInt64(0);
   DCHECK_EQ(visit_id, received_visit_id);
 
-  out_content_annotations->model_annotations.visibility_score =
-      static_cast<float>(statement.ColumnDouble(1));
-  out_content_annotations->model_annotations.categories =
-      GetCategoriesFromStringColumn(statement.ColumnString(2));
-  out_content_annotations->model_annotations.page_topics_model_version =
-      statement.ColumnInt64(3);
-  out_content_annotations->annotation_flags = statement.ColumnInt64(4);
-  out_content_annotations->model_annotations.entities =
-      GetCategoriesFromStringColumn(statement.ColumnString(5));
-  out_content_annotations->related_searches =
-      DeserializeFromStringColumn(statement.ColumnString(6));
-  out_content_annotations->search_normalized_url =
-      GURL(statement.ColumnString(7));
-  out_content_annotations->search_terms = statement.ColumnString16(8);
-  out_content_annotations->alternative_title = statement.ColumnString(9);
-  out_content_annotations->page_language = statement.ColumnString(10);
-  out_content_annotations->password_state =
-      PasswordStateFromInt(statement.ColumnInt(11));
-  out_content_annotations->has_url_keyed_image = statement.ColumnBool(12);
+  ReadVisitContentAnnotations(statement, out_content_annotations);
+  return true;
+}
+
+bool VisitAnnotationsDatabase::GetContentAnnotationsForVisits(
+    base::span<const VisitID> visit_ids,
+    base::flat_map<VisitID, VisitContentAnnotations>* content_annotations) {
+  CHECK(content_annotations);
+  content_annotations->clear();
+  if (visit_ids.empty()) {
+    return true;
+  }
+
+  std::vector<std::pair<VisitID, VisitContentAnnotations>> annotations;
+  annotations.reserve(visit_ids.size());
+
+  constexpr size_t kBatchSize = 250;
+
+  for (size_t chunk_start = 0; chunk_start < visit_ids.size();
+       chunk_start += kBatchSize) {
+    const size_t chunk_end =
+        std::min(chunk_start + kBatchSize, visit_ids.size());
+    const size_t chunk_size = chunk_end - chunk_start;
+
+    std::string sql = "SELECT" HISTORY_CONTENT_ANNOTATIONS_ROW_FIELDS
+                      "FROM content_annotations WHERE visit_id IN (";
+    sql.reserve(sql.size() + chunk_size * 2);
+    for (size_t j = 0; j < chunk_size; ++j) {
+      if (j > 0) {
+        sql.push_back(',');
+      }
+      sql.push_back('?');
+    }
+    sql.push_back(')');
+
+    sql::Statement statement(GetDB().GetUniqueStatement(sql));
+    if (!statement.is_valid()) {
+      return false;
+    }
+
+    for (size_t j = 0; j < chunk_size; ++j) {
+      statement.BindInt64(static_cast<int>(j), visit_ids[chunk_start + j]);
+    }
+
+    while (statement.Step()) {
+      VisitID visit_id = statement.ColumnInt64(0);
+      VisitContentAnnotations row_content_annotations;
+      ReadVisitContentAnnotations(statement, &row_content_annotations);
+      annotations.emplace_back(visit_id, std::move(row_content_annotations));
+    }
+
+    if (!statement.Succeeded()) {
+      return false;
+    }
+  }
+  *content_annotations =
+      base::flat_map<VisitID, VisitContentAnnotations>(std::move(annotations));
   return true;
 }
 
@@ -533,8 +604,9 @@ void VisitAnnotationsDatabase::DeleteAnnotationsForVisit(VisitID visit_id) {
   }
 
   auto cluster_id = GetClusterIdContainingVisit(visit_id);
-  if (cluster_id > 0 && GetVisitIdsInCluster(cluster_id).size() == 1)
+  if (cluster_id.value() > 0 && GetVisitIdsInCluster(cluster_id).size() == 1) {
     DeleteClusters({cluster_id});
+  }
 
   statement.Assign(GetDB().GetCachedStatement(
       SQL_FROM_HERE, "DELETE FROM clusters_and_visits WHERE visit_id=?"));
@@ -587,7 +659,7 @@ void VisitAnnotationsDatabase::AddClusters(
     clusters_statement.BindString16(2, cluster.raw_label.value_or(u""));
     clusters_statement.BindBool(3, cluster.triggerability_calculated);
     clusters_statement.BindString(4, cluster.originator_cache_guid);
-    clusters_statement.BindInt64(5, cluster.originator_cluster_id);
+    clusters_statement.BindInt64(5, cluster.originator_cluster_id.value());
     if (!clusters_statement.Run()) {
       DVLOG(0) << "Failed to execute 'clusters' insert statement";
       continue;
@@ -596,7 +668,7 @@ void VisitAnnotationsDatabase::AddClusters(
     DCHECK_GT(cluster_id, 0);
 
     // Insert each visit into 'clusters_and_visits'.
-    base::ranges::for_each(cluster.visits, [&](const auto& cluster_visit) {
+    std::ranges::for_each(cluster.visits, [&](const auto& cluster_visit) {
       const auto visit_id = cluster_visit.annotated_visit.visit_row.visit_id;
       DCHECK_GT(visit_id, 0);
       clusters_and_visits_statement.Reset(true);
@@ -654,9 +726,9 @@ void VisitAnnotationsDatabase::AddClusters(
   }
 }
 
-int64_t VisitAnnotationsDatabase::ReserveNextClusterId(
+ClusterId VisitAnnotationsDatabase::ReserveNextClusterId(
     const std::string& originator_cache_guid,
-    int64_t originator_cluster_id) {
+    ClusterId originator_cluster_id) {
   sql::Statement clusters_statement(
       GetDB().GetCachedStatement(SQL_FROM_HERE,
                                  "INSERT INTO clusters"
@@ -669,17 +741,17 @@ int64_t VisitAnnotationsDatabase::ReserveNextClusterId(
   clusters_statement.BindString16(2, u"");
   clusters_statement.BindBool(3, false);
   clusters_statement.BindString(4, originator_cache_guid);
-  clusters_statement.BindInt64(5, originator_cluster_id);
+  clusters_statement.BindInt64(5, originator_cluster_id.value());
   if (!clusters_statement.Run()) {
     DVLOG(0) << "Failed to execute 'clusters' insert statement";
   }
-  return GetDB().GetLastInsertRowId();
+  return ClusterId(GetDB().GetLastInsertRowId());
 }
 
 void VisitAnnotationsDatabase::AddVisitsToCluster(
-    int64_t cluster_id,
+    ClusterId cluster_id,
     const std::vector<ClusterVisit>& visits) {
-  DCHECK_GT(cluster_id, 0);
+  DCHECK_GT(cluster_id.value(), 0);
   sql::Statement clusters_and_visits_statement(
       GetDB().GetCachedStatement(SQL_FROM_HERE,
                                  "INSERT INTO clusters_and_visits"
@@ -687,10 +759,10 @@ void VisitAnnotationsDatabase::AddVisitsToCluster(
                                  "VALUES(?,?,?,?,?,?,?,?)"));
 
   // Insert each visit into 'clusters_and_visits'.
-  base::ranges::for_each(visits, [&](const auto& visit) {
+  std::ranges::for_each(visits, [&](const auto& visit) {
     DCHECK_GT(visit.annotated_visit.visit_row.visit_id, 0);
     clusters_and_visits_statement.Reset(true);
-    clusters_and_visits_statement.BindInt64(0, cluster_id);
+    clusters_and_visits_statement.BindInt64(0, cluster_id.value());
     clusters_and_visits_statement.BindInt64(
         1, visit.annotated_visit.visit_row.visit_id);
     // Tentatively score everything as 1.0.
@@ -710,7 +782,7 @@ void VisitAnnotationsDatabase::AddVisitsToCluster(
 }
 
 void VisitAnnotationsDatabase::UpdateClusterTriggerability(
-    const std::vector<history::Cluster>& clusters) {
+    const std::vector<Cluster>& clusters) {
   sql::Statement clusters_statement(GetDB().GetCachedStatement(
       SQL_FROM_HERE,
       "UPDATE clusters "
@@ -741,8 +813,8 @@ void VisitAnnotationsDatabase::UpdateClusterTriggerability(
       "(visit_id,duplicate_visit_id)"
       "VALUES(?,?)"));
 
-  base::ranges::for_each(clusters, [&](const auto& cluster) {
-    DCHECK_GT(cluster.cluster_id, 0);
+  std::ranges::for_each(clusters, [&](const auto& cluster) {
+    DCHECK_GT(cluster.cluster_id.value(), 0);
 
     // Update cluster visibility.
     clusters_statement.Reset(true);
@@ -751,25 +823,25 @@ void VisitAnnotationsDatabase::UpdateClusterTriggerability(
     clusters_statement.BindString16(1, cluster.label.value_or(u""));
     clusters_statement.BindString16(2, cluster.raw_label.value_or(u""));
     clusters_statement.BindBool(3, cluster.triggerability_calculated);
-    clusters_statement.BindInt64(4, cluster.cluster_id);
+    clusters_statement.BindInt64(4, cluster.cluster_id.value());
     if (!clusters_statement.Run()) {
       DVLOG(0) << "Failed to execute clusters update statement:  "
-               << "cluster_id = " << cluster.cluster_id;
+               << "cluster_id = " << cluster.cluster_id.value();
     }
 
     // Delete all previously persisted keywords.
     delete_cluster_keywords_statement.Reset(true);
-    delete_cluster_keywords_statement.BindInt64(0, cluster.cluster_id);
+    delete_cluster_keywords_statement.BindInt64(0, cluster.cluster_id.value());
     if (!delete_cluster_keywords_statement.Run()) {
       DVLOG(0) << "Failed to execute 'cluster_keywords' delete statement in "
                   "`UpdateClusterTriggerability()`:  cluster_id = "
-               << cluster.cluster_id;
+               << cluster.cluster_id.value();
     }
 
     // Add each keyword into 'cluster_keywords'.
     for (const auto& [keyword, keyword_data] : cluster.keyword_to_data_map) {
       cluster_keywords_statement.Reset(true);
-      cluster_keywords_statement.BindInt64(0, cluster.cluster_id);
+      cluster_keywords_statement.BindInt64(0, cluster.cluster_id.value());
       cluster_keywords_statement.BindString16(1, keyword);
       cluster_keywords_statement.BindInt(2, keyword_data.type);
       cluster_keywords_statement.BindDouble(3, keyword_data.score);
@@ -777,17 +849,18 @@ void VisitAnnotationsDatabase::UpdateClusterTriggerability(
       if (!cluster_keywords_statement.Run()) {
         DVLOG(0) << "Failed to execute 'cluster_keywords' insert statement in "
                     "`UpdateClusterTriggerability()`:  "
-                 << "cluster_id = " << cluster.cluster_id
+                 << "cluster_id = " << cluster.cluster_id.value()
                  << ", keyword = " << keyword;
       }
     }
 
-    base::ranges::for_each(cluster.visits, [&](const auto& cluster_visit) {
+    std::ranges::for_each(cluster.visits, [&](const auto& cluster_visit) {
       const auto visit_id = cluster_visit.annotated_visit.visit_row.visit_id;
       DCHECK_GT(visit_id, 0);
       update_cluster_visit_scores_statement.Reset(true);
       update_cluster_visit_scores_statement.BindDouble(0, cluster_visit.score);
-      update_cluster_visit_scores_statement.BindInt64(1, cluster.cluster_id);
+      update_cluster_visit_scores_statement.BindInt64(
+          1, cluster.cluster_id.value());
       update_cluster_visit_scores_statement.BindInt64(2, visit_id);
       if (!update_cluster_visit_scores_statement.Run()) {
         DVLOG(0) << "Failed to execute 'clusters_and_visits' update statement "
@@ -817,8 +890,8 @@ void VisitAnnotationsDatabase::UpdateClusterTriggerability(
 }
 
 void VisitAnnotationsDatabase::UpdateClusterVisit(
-    int64_t cluster_id,
-    const history::ClusterVisit& cluster_visit) {
+    ClusterId cluster_id,
+    const ClusterVisit& cluster_visit) {
   sql::Statement statement(
       GetDB().GetCachedStatement(SQL_FROM_HERE,
                                  "UPDATE clusters_and_visits "
@@ -833,7 +906,7 @@ void VisitAnnotationsDatabase::UpdateClusterVisit(
   statement.BindString16(3, cluster_visit.url_for_display);
   statement.BindInt(
       4, ClusterVisit::InteractionStateToInt(cluster_visit.interaction_state));
-  statement.BindInt64(5, cluster_id);
+  statement.BindInt64(5, cluster_id.value());
   statement.BindInt64(6, cluster_visit.annotated_visit.visit_row.visit_id);
   if (!statement.Run()) {
     DVLOG(0) << "Failed to execute 'clusters_and_visits' update statement in "
@@ -843,17 +916,17 @@ void VisitAnnotationsDatabase::UpdateClusterVisit(
   }
 }
 
-Cluster VisitAnnotationsDatabase::GetCluster(int64_t cluster_id) {
-  DCHECK_GT(cluster_id, 0);
+Cluster VisitAnnotationsDatabase::GetCluster(ClusterId cluster_id) {
+  DCHECK_GT(cluster_id.value(), 0);
   sql::Statement statement(GetDB().GetCachedStatement(
       SQL_FROM_HERE,
       "SELECT" HISTORY_CLUSTER_ROW_FIELDS "FROM clusters WHERE cluster_id=?"));
-  statement.BindInt64(0, cluster_id);
+  statement.BindInt64(0, cluster_id.value());
 
   if (!statement.Step())
     return {};
 
-  VisitID received_cluster_id = statement.ColumnInt64(0);
+  ClusterId received_cluster_id = ClusterId(statement.ColumnInt64(0));
   DCHECK_EQ(cluster_id, received_cluster_id);
 
   // The `VisitID` in column 0 is intentionally ignored, as it's not part of
@@ -876,11 +949,11 @@ Cluster VisitAnnotationsDatabase::GetCluster(int64_t cluster_id) {
     cluster.raw_label = std::nullopt;
   cluster.triggerability_calculated = statement.ColumnBool(4);
   cluster.originator_cache_guid = statement.ColumnString(5);
-  cluster.originator_cluster_id = statement.ColumnInt64(6);
+  cluster.originator_cluster_id = ClusterId(statement.ColumnInt64(6));
   return cluster;
 }
 
-std::vector<int64_t> VisitAnnotationsDatabase::GetMostRecentClusterIds(
+std::vector<ClusterId> VisitAnnotationsDatabase::GetMostRecentClusterIds(
     base::Time inclusive_min_time,
     base::Time exclusive_max_time,
     int max_clusters) {
@@ -898,22 +971,22 @@ std::vector<int64_t> VisitAnnotationsDatabase::GetMostRecentClusterIds(
   statement.BindTime(1, exclusive_max_time);
   statement.BindInt(2, max_clusters);
 
-  std::vector<int64_t> cluster_ids;
+  std::vector<ClusterId> cluster_ids;
   while (statement.Step())
-    cluster_ids.push_back(statement.ColumnInt64(0));
+    cluster_ids.emplace_back(statement.ColumnInt64(0));
   return cluster_ids;
 }
 
 std::vector<VisitID> VisitAnnotationsDatabase::GetVisitIdsInCluster(
-    int64_t cluster_id) {
-  DCHECK_GT(cluster_id, 0);
+    ClusterId cluster_id) {
+  DCHECK_GT(cluster_id.value(), 0);
   sql::Statement statement(
       GetDB().GetCachedStatement(SQL_FROM_HERE,
                                  "SELECT visit_id "
                                  "FROM clusters_and_visits "
                                  "WHERE cluster_id=? "
                                  "ORDER BY score DESC,visit_id DESC"));
-  statement.BindInt64(0, cluster_id);
+  statement.BindInt64(0, cluster_id.value());
 
   std::vector<VisitID> visit_ids;
   while (statement.Step())
@@ -941,8 +1014,8 @@ ClusterVisit VisitAnnotationsDatabase::GetClusterVisit(VisitID visit_id) {
   cluster_visit.score = static_cast<float>(statement.ColumnDouble(2));
   cluster_visit.engagement_score =
       static_cast<float>(statement.ColumnDouble(3));
-  cluster_visit.url_for_deduping = GURL(statement.ColumnString(4));
-  cluster_visit.normalized_url = GURL(statement.ColumnString(5));
+  cluster_visit.url_for_deduping = GURL(statement.ColumnStringView(4));
+  cluster_visit.normalized_url = GURL(statement.ColumnStringView(5));
   cluster_visit.url_for_display = statement.ColumnString16(6);
   cluster_visit.interaction_state =
       InteractionStateFromInt(statement.ColumnInt(7));
@@ -966,7 +1039,7 @@ VisitAnnotationsDatabase::GetDuplicateClusterVisitIdsForClusterVisit(
   return visit_ids;
 }
 
-int64_t VisitAnnotationsDatabase::GetClusterIdContainingVisit(
+ClusterId VisitAnnotationsDatabase::GetClusterIdContainingVisit(
     VisitID visit_id) {
   DCHECK_GT(visit_id, 0);
   sql::Statement statement(
@@ -977,15 +1050,15 @@ int64_t VisitAnnotationsDatabase::GetClusterIdContainingVisit(
                                  "LIMIT 1"));
   statement.BindInt64(0, visit_id);
   if (statement.Step())
-    return statement.ColumnInt64(0);
-  return 0;
+    return ClusterId(statement.ColumnInt64(0));
+  return ClusterId(0);
 }
 
-int64_t VisitAnnotationsDatabase::GetClusterIdForSyncedDetails(
+ClusterId VisitAnnotationsDatabase::GetClusterIdForSyncedDetails(
     const std::string& originator_cache_guid,
-    int64_t originator_cluster_id) {
+    ClusterId originator_cluster_id) {
   DCHECK(!originator_cache_guid.empty());
-  DCHECK_GT(originator_cluster_id, 0);
+  DCHECK_GT(originator_cluster_id.value(), 0);
 
   sql::Statement statement(GetDB().GetCachedStatement(
       SQL_FROM_HERE,
@@ -994,22 +1067,22 @@ int64_t VisitAnnotationsDatabase::GetClusterIdForSyncedDetails(
       "WHERE originator_cache_guid=? AND originator_cluster_id=? "
       "LIMIT 1"));
   statement.BindString(0, originator_cache_guid);
-  statement.BindInt64(1, originator_cluster_id);
+  statement.BindInt64(1, originator_cluster_id.value());
   if (statement.Step()) {
-    return statement.ColumnInt64(0);
+    return ClusterId(statement.ColumnInt64(0));
   }
-  return 0;
+  return ClusterId(0);
 }
 
 base::flat_map<std::u16string, ClusterKeywordData>
-VisitAnnotationsDatabase::GetClusterKeywords(int64_t cluster_id) {
-  DCHECK_GT(cluster_id, 0);
+VisitAnnotationsDatabase::GetClusterKeywords(ClusterId cluster_id) {
+  DCHECK_GT(cluster_id.value(), 0);
   sql::Statement statement(
       GetDB().GetCachedStatement(SQL_FROM_HERE,
                                  "SELECT keyword,type,score,collections "
                                  "FROM cluster_keywords "
                                  "WHERE cluster_id=?"));
-  statement.BindInt64(0, cluster_id);
+  statement.BindInt64(0, cluster_id.value());
 
   base::flat_map<std::u16string, ClusterKeywordData> keyword_data;
   while (statement.Step()) {
@@ -1042,7 +1115,7 @@ void VisitAnnotationsDatabase::HideVisits(
 }
 
 void VisitAnnotationsDatabase::DeleteClusters(
-    const std::vector<int64_t>& cluster_ids) {
+    const std::vector<ClusterId>& cluster_ids) {
   if (cluster_ids.empty())
     return;
 
@@ -1062,7 +1135,7 @@ void VisitAnnotationsDatabase::DeleteClusters(
 
   for (auto cluster_id : cluster_ids) {
     clusters_statement.Reset(true);
-    clusters_statement.BindInt64(0, cluster_id);
+    clusters_statement.BindInt64(0, cluster_id.value());
     if (!clusters_statement.Run()) {
       DVLOG(0) << "Failed to execute clusters delete statement:  "
                << "cluster_id = " << cluster_id;
@@ -1085,40 +1158,17 @@ void VisitAnnotationsDatabase::DeleteClusters(
     }
 
     clusters_and_visits_statement.Reset(true);
-    clusters_and_visits_statement.BindInt64(0, cluster_id);
+    clusters_and_visits_statement.BindInt64(0, cluster_id.value());
     if (!clusters_and_visits_statement.Run()) {
       DVLOG(0) << "Failed to execute clusters_and_visits delete statement:  "
                << "cluster_id = " << cluster_id;
     }
 
     cluster_keywords_statement.Reset(true);
-    cluster_keywords_statement.BindInt64(0, cluster_id);
+    cluster_keywords_statement.BindInt64(0, cluster_id.value());
     if (!cluster_keywords_statement.Run()) {
       DVLOG(0) << "Failed to execute cluster_keywords delete statement:  "
                << "cluster_id = " << cluster_id;
-    }
-  }
-}
-
-void VisitAnnotationsDatabase::UpdateVisitsInteractionState(
-    const std::vector<VisitID>& visit_ids,
-    ClusterVisit::InteractionState interaction_state) {
-  if (visit_ids.empty()) {
-    return;
-  }
-
-  sql::Statement statement(
-      GetDB().GetCachedStatement(SQL_FROM_HERE,
-                                 "UPDATE clusters_and_visits "
-                                 "SET interaction_state=? WHERE visit_id=?"));
-  for (auto visit_id : visit_ids) {
-    statement.Reset(true);
-    statement.BindInt(0,
-                      ClusterVisit::InteractionStateToInt(interaction_state));
-    statement.BindInt64(1, visit_id);
-    if (!statement.Run()) {
-      DVLOG(0) << "Failed to execute visit hide statement:  "
-               << "visit_id = " << visit_id;
     }
   }
 }
@@ -1242,9 +1292,11 @@ bool VisitAnnotationsDatabase::MigrateContentAnnotationsAddSearchMetadata() {
   // Add the `search_normalized_url` and `search_terms` columns to the older
   // versions of the table.
   return GetDB().Execute(
-      "ALTER TABLE content_annotations "
-      "ADD COLUMN search_normalized_url; \n"
-      "ALTER TABLE content_annotations ADD COLUMN search_terms LONGVARCHAR");
+             "ALTER TABLE content_annotations "
+             "ADD COLUMN search_normalized_url") &&
+         GetDB().Execute(
+             "ALTER TABLE content_annotations ADD COLUMN search_terms "
+             "LONGVARCHAR");
 }
 
 bool VisitAnnotationsDatabase::MigrateContentAnnotationsAddAlternativeTitle() {
@@ -1418,7 +1470,7 @@ bool VisitAnnotationsDatabase::ClustersTableContainsAutoincrement() {
     return false;
   }
 
-  std::string clusters_schema = statement.ColumnString(0);
+  std::string_view clusters_schema = statement.ColumnStringView(0);
   // We check if the whole schema contains "AUTOINCREMENT", since
   // "AUTOINCREMENT" only can be used for "INTEGER PRIMARY KEY", so we assume no
   // other columns could contain "AUTOINCREMENT".
@@ -1504,17 +1556,18 @@ std::string VisitAnnotationsDatabase::ConvertCategoriesToStringColumn(
 // functions should not be changed.
 std::vector<VisitContentModelAnnotations::Category>
 VisitAnnotationsDatabase::GetCategoriesFromStringColumn(
-    const std::string& column_value) {
+    std::string_view column_value) {
   std::vector<VisitContentModelAnnotations::Category> categories;
 
-  std::vector<std::string> category_strings = base::SplitString(
+  std::vector<std::string_view> category_strings = base::SplitStringPiece(
       column_value, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
-  for (const auto& category_string : category_strings) {
-    std::vector<std::string> category_parts = base::SplitString(
+  for (std::string_view category_string : category_strings) {
+    std::vector<std::string_view> category_parts = base::SplitStringPiece(
         category_string, ":", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
 
-    auto category = VisitContentModelAnnotations::Category::FromStringVector(
-        category_parts);
+    auto category =
+        VisitContentModelAnnotations::Category::FromStringViewVector(
+            category_parts);
     if (category) {
       categories.emplace_back(*category);
     }
@@ -1536,7 +1589,7 @@ std::string VisitAnnotationsDatabase::SerializeToStringColumn(
 // format is already being synced, the implementation of these functions
 // should not be changed.
 std::vector<std::string> VisitAnnotationsDatabase::DeserializeFromStringColumn(
-    const std::string& column_value) {
+    std::string_view column_value) {
   using std::string_literals::operator""s;
   return base::SplitString(column_value, "\0"s, base::TRIM_WHITESPACE,
                            base::SPLIT_WANT_NONEMPTY);

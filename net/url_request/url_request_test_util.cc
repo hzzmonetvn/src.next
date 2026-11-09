@@ -216,10 +216,45 @@ void TestDelegate::OnSSLCertificateError(URLRequest* request,
     request->Cancel();
 }
 
+void TestDelegate::OnPlatformLocalNetworkAccessPermissionRequired(
+    URLRequest* request) {
+  base::OnceClosure callback;
+  switch (platform_network_access_behavior_) {
+    case TestDelegate::PlatformNetworkAccessBehavior::kGrant:
+      callback =
+          base::BindOnce(&URLRequest::SetPlatformLocalNetworkAccessGranted,
+                         base::Unretained(request));
+      break;
+    case TestDelegate::PlatformNetworkAccessBehavior::kDeny:
+      callback =
+          base::BindOnce(&URLRequest::CancelPlatformLocalNetworkAccessRequest,
+                         base::Unretained(request));
+      break;
+    case TestDelegate::PlatformNetworkAccessBehavior::kDefault:
+      break;
+  }
+
+  if (callback) {
+    if (async_platform_local_network_access_decision_) {
+      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+          FROM_HERE, std::move(callback));
+    } else {
+      std::move(callback).Run();
+    }
+  } else {
+    URLRequest::Delegate::OnPlatformLocalNetworkAccessPermissionRequired(
+        request);
+  }
+}
+
 void TestDelegate::OnResponseStarted(URLRequest* request, int net_error) {
   // It doesn't make sense for the request to have IO pending at this point.
   DCHECK_NE(ERR_IO_PENDING, net_error);
   EXPECT_FALSE(request->is_redirecting());
+
+  if (net_error == OK) {
+    response_code_ = request->GetResponseCode();
+  }
 
   response_started_count_++;
   request_status_ = net_error;
@@ -362,7 +397,8 @@ int TestNetworkDelegate::OnHeadersReceived(
     const HttpResponseHeaders* original_response_headers,
     scoped_refptr<HttpResponseHeaders>* override_response_headers,
     const IPEndPoint& endpoint,
-    std::optional<GURL>* preserve_fragment_on_redirect_url) {
+    std::optional<GURL>* preserve_fragment_on_redirect_url,
+    const std::optional<net::SSLInfo>& ssl_info) {
   EXPECT_FALSE(preserve_fragment_on_redirect_url->has_value());
   int req_id = GetRequestId(request);
   bool is_first_response =
@@ -499,7 +535,6 @@ void TestNetworkDelegate::OnURLRequestDestroyed(URLRequest* request) {
 
 bool TestNetworkDelegate::OnAnnotateAndMoveUserBlockedCookies(
     const URLRequest& request,
-    const net::FirstPartySetMetadata& first_party_set_metadata,
     net::CookieAccessResultList& maybe_included_cookies,
     net::CookieAccessResultList& excluded_cookies) {
   RecordCookieSettingOverrides(request.cookie_setting_overrides());
@@ -509,8 +544,9 @@ bool TestNetworkDelegate::OnAnnotateAndMoveUserBlockedCookies(
 
   if (!allow) {
     blocked_annotate_cookies_count_++;
-    ExcludeAllCookies(CookieInclusionStatus::EXCLUDE_USER_PREFERENCES,
-                      maybe_included_cookies, excluded_cookies);
+    ExcludeAllCookies(
+        CookieInclusionStatus::ExclusionReason::EXCLUDE_USER_PREFERENCES,
+        maybe_included_cookies, excluded_cookies);
   }
 
   return allow;
@@ -526,7 +562,6 @@ bool TestNetworkDelegate::OnCanSetCookie(
     const URLRequest& request,
     const net::CanonicalCookie& cookie,
     CookieOptions* options,
-    const net::FirstPartySetMetadata& first_party_set_metadata,
     CookieInclusionStatus* inclusion_status) {
   RecordCookieSettingOverrides(request.cookie_setting_overrides());
   bool allow = true;
@@ -567,12 +602,6 @@ TestNetworkDelegate::OnGetStorageAccessStatus(
   return storage_access_status_;
 }
 
-bool TestNetworkDelegate::OnIsStorageAccessHeaderEnabled(
-    const url::Origin* top_frame_origin,
-    const GURL& url) const {
-  return is_storage_access_header_enabled_;
-}
-
 FilteringTestNetworkDelegate::FilteringTestNetworkDelegate() = default;
 FilteringTestNetworkDelegate::~FilteringTestNetworkDelegate() = default;
 
@@ -580,7 +609,6 @@ bool FilteringTestNetworkDelegate::OnCanSetCookie(
     const URLRequest& request,
     const net::CanonicalCookie& cookie,
     CookieOptions* options,
-    const net::FirstPartySetMetadata& first_party_set_metadata,
     CookieInclusionStatus* inclusion_status) {
   // Filter out cookies with the same name as |cookie_name_filter_| and
   // combine with |allowed_from_caller|.
@@ -593,7 +621,6 @@ bool FilteringTestNetworkDelegate::OnCanSetCookie(
 
   // Call the nested delegate's method first to avoid a short circuit.
   return TestNetworkDelegate::OnCanSetCookie(request, cookie, options,
-                                             first_party_set_metadata,
                                              inclusion_status) &&
          allowed;
 }
@@ -612,7 +639,6 @@ FilteringTestNetworkDelegate::OnForcePrivacyMode(
 
 bool FilteringTestNetworkDelegate::OnAnnotateAndMoveUserBlockedCookies(
     const URLRequest& request,
-    const net::FirstPartySetMetadata& first_party_set_metadata,
     net::CookieAccessResultList& maybe_included_cookies,
     net::CookieAccessResultList& excluded_cookies) {
   // Filter out cookies if |block_annotate_cookies_| is set and
@@ -623,21 +649,24 @@ bool FilteringTestNetworkDelegate::OnAnnotateAndMoveUserBlockedCookies(
 
   if (!allowed) {
     ++blocked_annotate_cookies_count_;
-    ExcludeAllCookies(net::CookieInclusionStatus::EXCLUDE_USER_PREFERENCES,
-                      maybe_included_cookies, excluded_cookies);
+    ExcludeAllCookies(
+        net::CookieInclusionStatus::ExclusionReason::EXCLUDE_USER_PREFERENCES,
+        maybe_included_cookies, excluded_cookies);
   }
 
   if (allowed && block_get_cookies_by_name_ && !cookie_name_filter_.empty()) {
     for (auto& cookie : maybe_included_cookies) {
       if (cookie.cookie.Name().find(cookie_name_filter_) != std::string::npos) {
         cookie.access_result.status.AddExclusionReason(
-            net::CookieInclusionStatus::EXCLUDE_USER_PREFERENCES);
+            net::CookieInclusionStatus::ExclusionReason::
+                EXCLUDE_USER_PREFERENCES);
       }
     }
     for (auto& cookie : excluded_cookies) {
       if (cookie.cookie.Name().find(cookie_name_filter_) != std::string::npos) {
         cookie.access_result.status.AddExclusionReason(
-            net::CookieInclusionStatus::EXCLUDE_USER_PREFERENCES);
+            net::CookieInclusionStatus::ExclusionReason::
+                EXCLUDE_USER_PREFERENCES);
       }
     }
 
@@ -646,8 +675,7 @@ bool FilteringTestNetworkDelegate::OnAnnotateAndMoveUserBlockedCookies(
 
   // Call the nested delegate's method first to avoid a short circuit.
   return TestNetworkDelegate::OnAnnotateAndMoveUserBlockedCookies(
-             request, first_party_set_metadata, maybe_included_cookies,
-             excluded_cookies) &&
+             request, maybe_included_cookies, excluded_cookies) &&
          allowed;
 }
 

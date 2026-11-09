@@ -7,26 +7,28 @@
 #include "base/files/file_path.h"
 #include "base/functional/bind.h"
 #include "base/task/single_thread_task_runner.h"
-#include "build/chromeos_buildflags.h"
+#include "build/build_config.h"
 #include "chrome/browser/download/download_prefs.h"
 #include "chrome/browser/platform_util.h"
-#include "chrome/browser/ui/chrome_select_file_policy.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/select_file_policy/chrome_select_file_policy.h"
 #include "components/download/public/common/base_file.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/download_item_utils.h"
 #include "content/public/browser/download_manager.h"
 #include "content/public/browser/web_contents.h"
+#include "ui/display/types/display_constants.h"
 #include "ui/shell_dialogs/selected_file_info.h"
 
-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS_LACROS) || BUILDFLAG(IS_WIN)
-#include "chrome/browser/ui/browser_list.h"
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN)
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
 #include "ui/aura/window.h"
 #endif
 
-using download::DownloadItem;
 using content::DownloadManager;
 using content::WebContents;
+using download::DownloadItem;
 
 DownloadFilePicker::DownloadFilePicker(download::DownloadItem* item,
                                        const base::FilePath& suggested_path,
@@ -36,14 +38,27 @@ DownloadFilePicker::DownloadFilePicker(download::DownloadItem* item,
       download_item_(item) {
   const DownloadPrefs* prefs = DownloadPrefs::FromBrowserContext(
       content::DownloadItemUtils::GetBrowserContext(item));
-  DCHECK(prefs);
+  CHECK(prefs, base::NotFatalUntil::M161);
 
-  DCHECK(item);
+  CHECK(item, base::NotFatalUntil::M161);
   item->AddObserver(this);
-  WebContents* web_contents = content::DownloadItemUtils::GetWebContents(item);
+  // Exiting fullscreen may spin a nested loop and destroy |download_item_|.
+  if (WebContents* initial_contents =
+          content::DownloadItemUtils::GetWebContents(item)) {
+    if (auto blocker = initial_contents->ForSecurityDropFullscreen(
+            display::kInvalidDisplayId)) {
+      fullscreen_block_ = std::move(*blocker);
+    }
+  }
+  WebContents* web_contents =
+      download_item_
+          ? content::DownloadItemUtils::GetWebContents(download_item_)
+          : nullptr;
   // Extension download may not have associated webcontents.
-  if (item->GetDownloadSource() != download::DownloadSource::EXTENSION_API &&
-      (!web_contents || !web_contents->GetNativeView())) {
+  if (!download_item_ || (web_contents && !fullscreen_block_) ||
+      (download_item_->GetDownloadSource() !=
+           download::DownloadSource::EXTENSION_API &&
+       (!web_contents || !web_contents->GetNativeView()))) {
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, base::BindOnce(&DownloadFilePicker::FileSelectionCanceled,
                                   base::Unretained(this)));
@@ -82,18 +97,20 @@ DownloadFilePicker::DownloadFilePicker(download::DownloadItem* item,
   // could be null, then it will cause the select file dialog is not modal
   // dialog in Linux (See SelectFileImpl() in select_file_dialog_linux_gtk.cc).
   // and windows.Here we make owning_window host to browser current active
-  // window if it is null. https://crbug.com/1301898
-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS_LACROS) || BUILDFLAG(IS_WIN)
+  // window if it is null. https://crbug.com/40825014
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN)
   if (!owning_window || !owning_window->GetHost()) {
-    owning_window = BrowserList::GetInstance()
-                        ->GetLastActive()
-                        ->window()
-                        ->GetNativeWindow();
+    if (BrowserWindowInterface* browser =
+            GetLastActiveBrowserWindowInterfaceWithAnyProfile();
+        browser && browser->GetWindow()) {
+      owning_window = browser->GetWindow()->GetNativeWindow();
+    }
   }
 #endif
 
   GURL caller = download::BaseFile::GetEffectiveAuthorityURL(
-      download_item_->GetURL(), download_item_->GetReferrerUrl());
+      download_item_->GetURL(), download_item_->GetReferrerUrl(),
+      download_item_->GetRequestInitiator());
   // Blob URLs are not set as referrer of downloads of them. If the download url
   // itself has no authority part, their is no authority url. For dlp we want to
   // use the blob's origin in that case.
@@ -144,6 +161,6 @@ void DownloadFilePicker::ShowFilePicker(DownloadItem* item,
 }
 
 void DownloadFilePicker::OnDownloadDestroyed(DownloadItem* download_item) {
-  DCHECK_EQ(download_item, download_item_);
+  CHECK_EQ(download_item, download_item_, base::NotFatalUntil::M161);
   download_item_ = nullptr;
 }

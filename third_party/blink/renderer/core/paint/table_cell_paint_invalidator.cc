@@ -39,21 +39,21 @@ void TableCellPaintInvalidator::InvalidatePaint() {
   // changed and the containers which will paint backgrounds and/or collapsed
   // borders haven't been full invalidated, invalidate the containers.
   if (context_.old_paint_offset != context_.fragment_data->PaintOffset() ||
-      cell_.Size() != cell_.PreviousSize()) {
+      cell_.StitchedSize() != cell_.PreviousSize()) {
     // Table row background is painted inside cell's geometry.
     const auto& row = *cell_.Parent();
     DCHECK(row.IsTableRow());
     if (!DisplayItemClientIsFullyInvalidated(row) &&
-        row.StyleRef().HasBackground()) {
-      InvalidateContainerForCellGeometryChange(row, *context_.ParentContext());
+        row.Style().HasBackground()) {
+      InvalidateContainerForCellGeometryChange(row, *context_.parent_context);
     }
     // Table section background is painted inside cell's geometry.
     const auto& section = *row.Parent();
     DCHECK(section.IsTableSection());
     if (!DisplayItemClientIsFullyInvalidated(section) &&
-        section.StyleRef().HasBackground()) {
+        section.Style().HasBackground()) {
       InvalidateContainerForCellGeometryChange(
-          section, *context_.ParentContext()->ParentContext());
+          section, *context_.parent_context->parent_context);
     }
     // Table paints its background, and column backgrounds inside cell's
     // geometry.
@@ -61,7 +61,7 @@ void TableCellPaintInvalidator::InvalidatePaint() {
     if (!DisplayItemClientIsFullyInvalidated(table) &&
         (table.HasBackgroundForPaint() || table.HasCollapsedBorders())) {
       InvalidateContainerForCellGeometryChange(
-          table, *context_.ParentContext()->ParentContext()->ParentContext());
+          table, *context_.parent_context->parent_context->parent_context);
     }
   }
 

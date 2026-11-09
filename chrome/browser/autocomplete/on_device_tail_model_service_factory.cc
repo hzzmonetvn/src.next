@@ -8,9 +8,12 @@
 
 #include "base/no_destructor.h"
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/optimization_guide/optimization_guide_keyed_service.h"
-#include "chrome/browser/optimization_guide/optimization_guide_keyed_service_factory.h"
+#include "chrome/browser/optimization_guide/model_execution/optimization_guide_global_state.h"
+#include "chrome/browser/optimization_guide/optimization_guide_global_state_holder_keyed_service.h"
+#include "chrome/browser/optimization_guide/optimization_guide_global_state_holder_keyed_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chrome/common/chrome_features.h"
+#include "components/omnibox/browser/omnibox_field_trial.h"
 #include "components/omnibox/browser/on_device_tail_model_service.h"
 
 // static
@@ -39,7 +42,8 @@ OnDeviceTailModelServiceFactory::OnDeviceTailModelServiceFactory()
               // Ash Internals.
               .WithAshInternals(ProfileSelection::kOwnInstance)
               .Build()) {
-  DependsOn(OptimizationGuideKeyedServiceFactory::GetInstance());
+  DependsOn(
+      OptimizationGuideGlobalStateHolderKeyedServiceFactory::GetInstance());
 }
 
 OnDeviceTailModelServiceFactory::~OnDeviceTailModelServiceFactory() = default;
@@ -47,17 +51,23 @@ OnDeviceTailModelServiceFactory::~OnDeviceTailModelServiceFactory() = default;
 std::unique_ptr<KeyedService>
 OnDeviceTailModelServiceFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
+  const std::string locale = g_browser_process->GetApplicationLocale();
+  if (!OmniboxFieldTrial::IsOnDeviceTailSuggestEnabled(locale)) {
+    return nullptr;
+  }
   Profile* profile = Profile::FromBrowserContext(context);
-  OptimizationGuideKeyedService* optimization_guide =
-      OptimizationGuideKeyedServiceFactory::GetForProfile(profile);
-  return optimization_guide
-             ? std::make_unique<OnDeviceTailModelService>(optimization_guide)
+  OptimizationGuideGlobalStateHolderKeyedService* global_state_service =
+      OptimizationGuideGlobalStateHolderKeyedServiceFactory::GetForProfile(
+          profile);
+  return global_state_service
+             ? std::make_unique<OnDeviceTailModelService>(
+                   &global_state_service->GetGlobalState().model_provider())
              : nullptr;
 }
 
 bool OnDeviceTailModelServiceFactory::ServiceIsCreatedWithBrowserContext()
     const {
-  return true;
+  return !features::IsLazyOptimizationGuideModelsEnabled();
 }
 
 bool OnDeviceTailModelServiceFactory::ServiceIsNULLWhileTesting() const {

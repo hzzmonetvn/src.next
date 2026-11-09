@@ -8,7 +8,6 @@
 
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "third_party/blink/public/common/frame/frame_visual_properties.h"
-#include "third_party/blink/public/common/permissions_policy/permissions_policy.h"
 #include "third_party/blink/public/common/storage_key/storage_key.h"
 #include "third_party/blink/public/mojom/frame/frame_replication_state.mojom-blink.h"
 #include "third_party/blink/public/mojom/frame/frame_replication_state.mojom.h"
@@ -22,7 +21,6 @@
 #include "third_party/blink/renderer/core/execution_context/remote_security_context.h"
 #include "third_party/blink/renderer/core/execution_context/security_context.h"
 #include "third_party/blink/renderer/core/exported/web_view_impl.h"
-#include "third_party/blink/renderer/core/frame/csp/conversion_util.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/local_frame_view.h"
 #include "third_party/blink/renderer/core/frame/remote_frame_client_impl.h"
@@ -30,7 +28,6 @@
 #include "third_party/blink/renderer/core/frame/settings.h"
 #include "third_party/blink/renderer/core/frame/web_frame_widget_impl.h"
 #include "third_party/blink/renderer/core/frame/web_local_frame_impl.h"
-#include "third_party/blink/renderer/core/html/fenced_frame/html_fenced_frame_element.h"
 #include "third_party/blink/renderer/core/html/html_frame_owner_element.h"
 #include "third_party/blink/renderer/core/html_names.h"
 #include "third_party/blink/renderer/core/layout/layout_object.h"
@@ -51,8 +48,8 @@ mojom::blink::FrameReplicationStatePtr ToBlinkFrameReplicationState(
   mojom::blink::FrameReplicationStatePtr result =
       mojom::blink::FrameReplicationState::New();
   result->origin = SecurityOrigin::CreateFromUrlOrigin(to_convert->origin);
-  result->name = WebString::FromUTF8(to_convert->name);
-  result->unique_name = WebString::FromUTF8(to_convert->unique_name);
+  result->name = WebString::FromUtf8(to_convert->name);
+  result->unique_name = WebString::FromUtf8(to_convert->unique_name);
 
   for (const auto& header : to_convert->permissions_policy_header)
     result->permissions_policy_header.push_back(header);
@@ -69,7 +66,8 @@ mojom::blink::FrameReplicationStatePtr ToBlinkFrameReplicationState(
   result->has_active_user_gesture = to_convert->has_active_user_gesture;
   result->has_received_user_gesture_before_nav =
       to_convert->has_received_user_gesture_before_nav;
-  result->is_ad_frame = to_convert->is_ad_frame;
+  result->ad_frame_status = to_convert->ad_frame_status;
+  result->is_secure_context_root = to_convert->is_secure_context_root;
   return result;
 }
 
@@ -142,7 +140,7 @@ WebRemoteFrameImpl* WebRemoteFrameImpl::CreateMainFrame(
   return frame;
 }
 
-WebRemoteFrameImpl* WebRemoteFrameImpl::CreateForFencedFrame(
+WebRemoteFrameImpl* WebRemoteFrameImpl::CreatePlaceholderForEmbeddedFrameTree(
     mojom::blink::TreeScopeType scope,
     const RemoteFrameToken& frame_token,
     const base::UnguessableToken& devtools_frame_token,
@@ -151,13 +149,8 @@ WebRemoteFrameImpl* WebRemoteFrameImpl::CreateForFencedFrame(
         remote_frame_host,
     mojo::PendingAssociatedReceiver<mojom::blink::RemoteFrame> receiver,
     mojom::blink::FrameReplicationStatePtr replicated_state) {
-  // We first convert this to a raw blink::Element*, and manually convert this
-  // to an HTMLElement*. That is the only way the IsA<> and To<> casts below
-  // will work.
-  DCHECK(IsA<HTMLFencedFrameElement>(frame_owner));
+  DCHECK(frame_owner);
   auto* frame = MakeGarbageCollected<WebRemoteFrameImpl>(scope, frame_token);
-  ExecutionContext* execution_context = frame_owner->GetExecutionContext();
-  DCHECK(RuntimeEnabledFeatures::FencedFramesEnabled(execution_context));
   LocalFrame* host_frame = frame_owner->GetDocument().GetFrame();
   frame->InitializeCoreFrame(
       *host_frame->GetPage(), frame_owner, /*parent=*/nullptr,
@@ -224,6 +217,7 @@ WebLocalFrame* WebRemoteFrameImpl::CreateLocalChild(
     const LocalFrameToken& frame_token,
     WebFrame* opener,
     const DocumentToken& document_token,
+    const InitiatorStateToken& initiator_state_token,
     CrossVariantMojoRemote<mojom::BrowserInterfaceBrokerInterfaceBase>
         interface_broker,
     std::unique_ptr<WebPolicyContainer> policy_container) {
@@ -250,9 +244,9 @@ WebLocalFrame* WebRemoteFrameImpl::CreateLocalChild(
   child->InitializeCoreFrame(
       *GetFrame()->GetPage(), owner, this, previous_sibling,
       FrameInsertType::kInsertInConstructor, name, window_agent_factory, opener,
-      document_token, std::move(interface_broker), std::move(policy_container),
-      storage_key,
-      /*creator_base_url=*/KURL());
+      document_token, initiator_state_token, std::move(interface_broker),
+      std::move(policy_container), storage_key,
+      /*creator_base_url=*/NullUrl());
   DCHECK(child->GetFrame());
   return child;
 }
@@ -276,9 +270,7 @@ void WebRemoteFrameImpl::InitializeCoreFrame(
 
   // If this is not a top-level frame, we need to send FrameVisualProperties to
   // the remote renderer process. Some of the properties are inherited from the
-  // WebFrameWidget containing this frame, and this is true for regular frames
-  // in the frame tree as well as for fenced frames, which are not in the frame
-  // tree; hence the code to traverse up through FrameOwner.
+  // WebFrameWidget containing this frame.
   WebFrameWidgetImpl* ancestor_widget = nullptr;
   if (parent) {
     if (parent->IsWebLocalFrame()) {
@@ -286,10 +278,10 @@ void WebRemoteFrameImpl::InitializeCoreFrame(
           To<WebLocalFrameImpl>(parent)->LocalRoot()->FrameWidgetImpl();
     }
   } else if (owner && owner->IsLocal()) {
-    // Never gets to this point unless |owner| is a <fencedframe>
-    // element.
+    // Never gets to this point unless |owner| is a <persistentwidget> element.
     HTMLFrameOwnerElement* owner_element = To<HTMLFrameOwnerElement>(owner);
-    DCHECK(owner_element->IsHTMLFencedFrameElement());
+    DCHECK_EQ(owner_element->OwnerType(),
+              FrameOwnerElementType::kPersistentwidget);
     LocalFrame& local_frame =
         owner_element->GetDocument().GetFrame()->LocalFrameRoot();
     ancestor_widget =
@@ -364,8 +356,8 @@ void WebRemoteFrameImpl::InitializeFrameVisualProperties(
       ancestor_widget->PinchGestureActiveInMainFrame();
   visual_properties.screen_infos = ancestor_widget->GetOriginalScreenInfos();
   visual_properties.visible_viewport_size =
-      ancestor_widget->VisibleViewportSizeInDIPs();
-  const WebVector<gfx::Rect>& viewport_segments =
+      ancestor_widget->VisibleViewportSize();
+  const std::vector<gfx::Rect>& viewport_segments =
       ancestor_widget->ViewportSegments();
   visual_properties.root_widget_viewport_segments.assign(
       viewport_segments.begin(), viewport_segments.end());
@@ -401,8 +393,7 @@ v8::Local<v8::Object> WebRemoteFrameImpl::GlobalProxy(
     v8::Isolate* isolate) const {
   return GetFrame()
       ->GetWindowProxy(DOMWrapperWorld::MainWorld(isolate))
-      ->GlobalProxyIfNotDetached()
-      .ToLocalChecked();
+      ->GetGlobalProxy();
 }
 
 gfx::Rect WebRemoteFrameImpl::GetCompositingRect() {
@@ -465,7 +456,8 @@ void WebRemoteFrameImpl::SetReplicatedState(
   remote_frame->SetReplicatedName(state->name, state->unique_name);
   remote_frame->SetInsecureRequestPolicy(state->insecure_request_policy);
   remote_frame->EnforceInsecureNavigationsSet(state->insecure_navigations_set);
-  remote_frame->SetReplicatedIsAdFrame(state->is_ad_frame);
+  remote_frame->SetReplicatedAdFrameStatus(state->ad_frame_status);
+  remote_frame->SetReplicatedIsSecureContextRoot(state->is_secure_context_root);
 
   if (state->has_active_user_gesture) {
     // TODO(crbug.com/1087963): This should be hearing about sticky activations

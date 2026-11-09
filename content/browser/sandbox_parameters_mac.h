@@ -5,6 +5,7 @@
 #ifndef CONTENT_BROWSER_SANDBOX_PARAMETERS_MAC_H_
 #define CONTENT_BROWSER_SANDBOX_PARAMETERS_MAC_H_
 
+#include "base/feature_list.h"
 #include "content/common/content_export.h"
 
 namespace base {
@@ -13,7 +14,7 @@ class FilePath;
 }
 
 namespace sandbox {
-class SandboxCompiler;
+class SandboxSerializer;
 namespace mojom {
 enum class Sandbox;
 }  // namespace mojom
@@ -21,12 +22,14 @@ enum class Sandbox;
 
 namespace content {
 
+CONTENT_EXPORT BASE_DECLARE_FEATURE(kMacSandboxRestrictGpuDarwinUserDirs);
+
 // This populates the sandbox parameters in the client for the given
 // |sandbox_type|. Some parameters may be extracted from the |command_line|.
 CONTENT_EXPORT bool SetupSandboxParameters(
     sandbox::mojom::Sandbox sandbox_type,
     const base::CommandLine& command_line,
-    sandbox::SandboxCompiler* compiler);
+    sandbox::SandboxSerializer* serializer);
 
 // Expands the SandboxType::kNetwork policy to allow reading files from
 // the specified |path|, which stores TLS certificates used by the browser

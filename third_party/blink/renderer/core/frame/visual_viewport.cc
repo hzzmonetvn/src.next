@@ -37,10 +37,13 @@
 #include "base/task/single_thread_task_runner.h"
 #include "cc/input/main_thread_scrolling_reason.h"
 #include "cc/layers/solid_color_scrollbar_layer.h"
+#include "third_party/blink/public/mojom/scroll/scroll_enums.mojom-blink.h"
 #include "third_party/blink/public/mojom/scroll/scroll_into_view_params.mojom-blink.h"
 #include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/public/platform/task_type.h"
+#include "third_party/blink/public/platform/web_theme_engine.h"
 #include "third_party/blink/renderer/core/accessibility/ax_object_cache.h"
+#include "third_party/blink/renderer/core/frame/browser_controls.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/frame/local_frame_client.h"
 #include "third_party/blink/renderer/core/frame/local_frame_view.h"
@@ -66,7 +69,7 @@
 #include "third_party/blink/renderer/core/scroll/scroll_into_view_util.h"
 #include "third_party/blink/renderer/core/scroll/scrollbar.h"
 #include "third_party/blink/renderer/core/scroll/scrollbar_theme_overlay_mobile.h"
-#include "third_party/blink/renderer/core/scroll/smooth_scroll_sequencer.h"
+#include "third_party/blink/renderer/platform/graphics/color.h"
 #include "third_party/blink/renderer/platform/graphics/compositing/paint_artifact_compositor.h"
 #include "third_party/blink/renderer/platform/graphics/graphics_context.h"
 #include "third_party/blink/renderer/platform/graphics/paint/effect_paint_property_node.h"
@@ -74,6 +77,8 @@
 #include "third_party/blink/renderer/platform/graphics/paint/transform_paint_property_node.h"
 #include "third_party/blink/renderer/platform/instrumentation/tracing/trace_event.h"
 #include "third_party/blink/renderer/platform/instrumentation/tracing/traced_value.h"
+#include "third_party/blink/renderer/platform/theme/web_theme_engine_helper.h"
+#include "third_party/blink/renderer/platform/web_test_support.h"
 #include "third_party/skia/include/core/SkColor.h"
 #include "ui/gfx/geometry/point_conversions.h"
 #include "ui/gfx/geometry/size_conversions.h"
@@ -84,12 +89,136 @@ namespace blink {
 namespace {
 
 OverscrollType ComputeOverscrollType() {
-  if (!Platform::Current()->IsElasticOverscrollEnabled())
+  if (!Platform::Current()->IsElasticOverscrollEnabledOnRoot()) {
     return OverscrollType::kNone;
+  }
   return OverscrollType::kTransform;
 }
 
 }  // anonymous namespace
+
+// Adapter implementing `cc::Scrollbar` for `VisualViewport`'s compositor
+// scrollbar layers (`cc::SolidColorScrollbarLayer`). Unlike regular
+// `ScrollableArea`s, which create `blink::Scrollbar` instances and wrap them in
+// `blink::ScrollbarLayerDelegate`, `VisualViewport` manages its solid-color
+// overlay scrollbar layers directly.
+//
+// `cc::SolidColorScrollbarLayer` only reads `Orientation()`,
+// `IsLeftSideVerticalScrollbar()`, `IsSolidColor()`, `IsOverlay()`,
+// `ThumbRect()` (for thumb thickness), `TrackRect()` (for track start),
+// `ThumbColor()`, and `IsSame()`; the actual thumb length and position are
+// computed on the compositor thread by `cc::SolidColorScrollbarLayerImpl` and
+// no main-thread painting or resource upload occurs. Therefore, the
+// implementation of most `cc::Scrollbar` methods below does not matter.
+class VisualViewport::ScrollbarDelegate : public cc::Scrollbar {
+ public:
+  ScrollbarDelegate(VisualViewport& visual_viewport,
+                    ScrollbarOrientation orientation)
+      : visual_viewport_(&visual_viewport), orientation_(orientation) {}
+
+  void SetThumbNeedsRepaint() { thumb_needs_repaint_ = true; }
+
+  // cc::Scrollbar implementation:
+  bool IsSame(const cc::Scrollbar& other) const override {
+    return this == &other;
+  }
+  cc::ScrollbarOrientation Orientation() const override {
+    return orientation_ == kHorizontalScrollbar
+               ? cc::ScrollbarOrientation::kHorizontal
+               : cc::ScrollbarOrientation::kVertical;
+  }
+  bool IsLeftSideVerticalScrollbar() const override { return false; }
+  bool IsSolidColor() const override { return true; }
+  bool IsOverlay() const override { return true; }
+  bool IsRunningWebTest() const override {
+    return WebTestSupport::IsRunningWebTest();
+  }
+  bool IsFluentOverlayScrollbarMinimalMode() const override { return false; }
+  bool HasThumb() const override { return true; }
+  bool SupportsDragSnapBack() const override { return false; }
+  bool JumpOnTrackClick() const override { return false; }
+  bool IsOpaque() const override { return false; }
+  int MinimumThumbLength() const override { return 0; }
+
+  gfx::Rect ThumbRect() const override {
+    if (!visual_viewport_ || !visual_viewport_->IsActiveViewport()) {
+      return gfx::Rect();
+    }
+    // `cc::SolidColorScrollbarLayer` only uses `ThumbRect()` to extract
+    // `thumb_thickness` (height for horizontal, width for vertical). The thumb
+    // origin and length along the track are computed on the compositor thread
+    // by `cc::SolidColorScrollbarLayerImpl`, so those values do not matter.
+    int thumb_thickness =
+        ScrollbarThemeOverlayMobile::GetInstance().ThumbThickness(
+            visual_viewport_->ScaleFromDIP(),
+            visual_viewport_->CSSScrollbarWidth());
+    return gfx::Rect(0, 0, thumb_thickness, thumb_thickness);
+  }
+
+  gfx::Rect TrackRect() const override {
+    if (!visual_viewport_ || !visual_viewport_->IsActiveViewport()) {
+      return gfx::Rect();
+    }
+    // `cc::SolidColorScrollbarLayer` only uses `TrackRect()` to extract
+    // `track_start` (`x()` for horizontal, `y()` for vertical), which equals
+    // the scrollbar margin. The track size is computed from the layer bounds on
+    // the compositor thread, so the width and height here do not matter.
+    int margin = ScrollbarThemeOverlayMobile::GetInstance().ScrollbarMargin(
+        visual_viewport_->ScaleFromDIP(),
+        visual_viewport_->CSSScrollbarWidth());
+    return gfx::Rect(margin, margin, 0, 0);
+  }
+
+  gfx::Rect BackButtonRect() const override { return gfx::Rect(); }
+  gfx::Rect ForwardButtonRect() const override { return gfx::Rect(); }
+  float Opacity() const override { return 1.f; }
+  bool HasTickmarks() const override { return false; }
+
+  bool ThumbNeedsRepaint() const override { return thumb_needs_repaint_; }
+  void ClearThumbNeedsRepaint() override { thumb_needs_repaint_ = false; }
+  bool TrackAndButtonsNeedRepaint() const override { return false; }
+
+  void PaintThumb(cc::PaintCanvas& canvas, const gfx::Rect& rect) override {
+    NOTREACHED();
+  }
+  void PaintTrackAndButtons(cc::PaintCanvas& canvas,
+                            const gfx::Rect& rect) override {
+    NOTREACHED();
+  }
+
+  SkColor4f ThumbColor() const override {
+    if (!visual_viewport_ || !visual_viewport_->IsActiveViewport()) {
+      return SkColors::kTransparent;
+    }
+    return visual_viewport_->ScrollbarThumbColor();
+  }
+
+  bool NeedsUpdateDisplay() const override { return false; }
+  void ClearNeedsUpdateDisplay() override {}
+  bool UsesNinePatchThumbResource() const override { return false; }
+  gfx::Size NinePatchThumbCanvasSize() const override { return gfx::Size(); }
+  gfx::Rect NinePatchThumbAperture() const override { return gfx::Rect(); }
+  bool UsesSolidColorThumb() const override { return false; }
+  gfx::Insets SolidColorThumbInsets() const override { return gfx::Insets(); }
+  bool UsesNinePatchTrackAndButtonsResource() const override { return false; }
+  gfx::Size NinePatchTrackAndButtonsCanvasSize(float scale) const override {
+    return gfx::Size();
+  }
+  gfx::Rect NinePatchTrackAndButtonsAperture(float scale) const override {
+    return gfx::Rect();
+  }
+  gfx::Rect ShrinkMainThreadedMinimalModeThumbRect(
+      gfx::Rect& rect) const override {
+    return rect;
+  }
+
+ private:
+  ~ScrollbarDelegate() override = default;
+
+  WeakPersistent<VisualViewport> visual_viewport_;
+  ScrollbarOrientation orientation_;
+  bool thumb_needs_repaint_ = true;
+};
 
 VisualViewport::VisualViewport(Page& owner)
     : ScrollableArea(owner.GetAgentGroupScheduler().CompositorTaskRunner()),
@@ -215,7 +344,7 @@ PaintPropertyChangeType VisualViewport::UpdatePaintPropertyNodesIfNeeded(
     if (scale_ != 1.f)
       state.transform_and_origin.matrix = gfx::Transform::MakeScale(scale_);
     state.in_subtree_of_page_scale = false;
-    state.direct_compositing_reasons = CompositingReason::kViewport;
+    state.direct_compositing_reasons = {CompositingReason::kViewport};
     state.compositor_element_id = page_scale_element_id_;
 
     if (!page_scale_node_) {
@@ -248,7 +377,7 @@ PaintPropertyChangeType VisualViewport::UpdatePaintPropertyNodesIfNeeded(
   {
     ScrollPaintPropertyNode::State state;
     state.container_rect = gfx::Rect(size_);
-    state.contents_size = ContentsSize();
+    state.contents_rect = gfx::Rect(ContentsSize());
 
     state.user_scrollable_horizontal =
         UserInputScrollable(kHorizontalScrollbar);
@@ -292,7 +421,7 @@ PaintPropertyChangeType VisualViewport::UpdatePaintPropertyNodesIfNeeded(
     TransformPaintPropertyNode::State state{
         {gfx::Transform::MakeTranslation(-offset_)}};
     state.scroll = scroll_node_;
-    state.direct_compositing_reasons = CompositingReason::kViewport;
+    state.direct_compositing_reasons = {CompositingReason::kViewport};
     if (!scroll_translation_node_) {
       scroll_translation_node_ = TransformPaintPropertyNode::Create(
           *page_scale_node_, std::move(state));
@@ -322,8 +451,8 @@ PaintPropertyChangeType VisualViewport::UpdatePaintPropertyNodesIfNeeded(
   if (scrollbar_layer_horizontal_) {
     EffectPaintPropertyNode::State state;
     state.local_transform_space = transform_parent;
-    state.direct_compositing_reasons =
-        CompositingReason::kActiveOpacityAnimation;
+    state.direct_compositing_reasons = {
+        CompositingReason::kActiveOpacityAnimation};
     state.compositor_element_id =
         GetScrollbarElementId(ScrollbarOrientation::kHorizontalScrollbar);
     if (!horizontal_scrollbar_effect_node_) {
@@ -339,8 +468,8 @@ PaintPropertyChangeType VisualViewport::UpdatePaintPropertyNodesIfNeeded(
   if (scrollbar_layer_vertical_) {
     EffectPaintPropertyNode::State state;
     state.local_transform_space = transform_parent;
-    state.direct_compositing_reasons =
-        CompositingReason::kActiveOpacityAnimation;
+    state.direct_compositing_reasons = {
+        CompositingReason::kActiveOpacityAnimation};
     state.compositor_element_id =
         GetScrollbarElementId(ScrollbarOrientation::kVerticalScrollbar);
     if (!vertical_scrollbar_effect_node_) {
@@ -392,7 +521,8 @@ void VisualViewport::EnqueueResizeEvent() {
     document->EnqueueVisualViewportResizeEvent();
 }
 
-void VisualViewport::SetSize(const gfx::Size& size) {
+void VisualViewport::SetSize(const gfx::Size& size,
+                             bool should_suppress_resize_event) {
   if (size_ == size)
     return;
 
@@ -400,8 +530,7 @@ void VisualViewport::SetSize(const gfx::Size& size) {
                "height", size.height());
   size_ = size;
 
-  TRACE_EVENT_INSTANT1("loading", "viewport", TRACE_EVENT_SCOPE_THREAD, "data",
-                       ViewportToTracedValue());
+  TRACE_EVENT_INSTANT("loading", "viewport", "data", ViewportToTracedValue());
 
   if (!IsActiveViewport())
     return;
@@ -416,7 +545,9 @@ void VisualViewport::SetSize(const gfx::Size& size) {
     LocalMainFrame().View()->SetVisualViewportOrOverlayNeedsRepaint();
   }
 
-  EnqueueResizeEvent();
+  if (!should_suppress_resize_event) {
+    EnqueueResizeEvent();
+  }
 }
 
 void VisualViewport::Reset() {
@@ -461,8 +592,10 @@ gfx::PointF VisualViewport::ViewportCSSPixelsToRootFrame(
   return point_in_root_frame;
 }
 
-void VisualViewport::SetLocation(const gfx::PointF& new_location) {
-  SetScaleAndLocation(scale_, is_pinch_gesture_active_, new_location);
+void VisualViewport::SetLocation(const gfx::PointF& new_location,
+                                 mojom::blink::ScrollType scroll_type) {
+  SetScaleAndLocation(scale_, is_pinch_gesture_active_, new_location,
+                      scroll_type);
 }
 
 void VisualViewport::Move(const ScrollOffset& delta) {
@@ -512,8 +645,10 @@ double VisualViewport::ScaleForVisualViewport() const {
 
 void VisualViewport::SetScaleAndLocation(float scale,
                                          bool is_pinch_gesture_active,
-                                         const gfx::PointF& location) {
-  if (DidSetScaleOrLocation(scale, is_pinch_gesture_active, location)) {
+                                         const gfx::PointF& location,
+                                         mojom::blink::ScrollType scroll_type) {
+  if (DidSetScaleOrLocation(scale, is_pinch_gesture_active, location,
+                            scroll_type)) {
     // In remote or nested main frame cases, the visual viewport is inert so it
     // cannot be moved or scaled. This is enforced by setting page scale
     // constraints.
@@ -540,9 +675,11 @@ double VisualViewport::VisibleHeightCSSPx() const {
   return height_css_px;
 }
 
-bool VisualViewport::DidSetScaleOrLocation(float scale,
-                                           bool is_pinch_gesture_active,
-                                           const gfx::PointF& location) {
+bool VisualViewport::DidSetScaleOrLocation(
+    float scale,
+    bool is_pinch_gesture_active,
+    const gfx::PointF& location,
+    mojom::blink::ScrollType scroll_type) {
   if (!IsActiveViewport()) {
     is_pinch_gesture_active_ = is_pinch_gesture_active;
     // The VisualViewport in an embedded widget must always be 1.0 or else
@@ -599,7 +736,7 @@ bool VisualViewport::DidSetScaleOrLocation(float scale,
 
     EnqueueScrollEvent();
 
-    LocalMainFrame().View()->DidChangeScrollOffset();
+    LocalMainFrame().View()->DidChangeScrollOffset(scroll_type);
     values_changed = true;
   }
 
@@ -613,8 +750,7 @@ bool VisualViewport::DidSetScaleOrLocation(float scale,
 
   needs_paint_property_update_ = true;
   if (notify_page_scale_factor_changed) {
-    TRACE_EVENT_INSTANT1("loading", "viewport", TRACE_EVENT_SCOPE_THREAD,
-                         "data", ViewportToTracedValue());
+    TRACE_EVENT_INSTANT("loading", "viewport", "data", ViewportToTracedValue());
   }
   return true;
 }
@@ -656,6 +792,8 @@ void VisualViewport::InitializeScrollbars() {
 
   scrollbar_layer_horizontal_ = nullptr;
   scrollbar_layer_vertical_ = nullptr;
+  scrollbar_delegate_horizontal_ = nullptr;
+  scrollbar_delegate_vertical_ = nullptr;
   if (VisualViewportSuppliesScrollbars() &&
       !GetPage().GetSettings().GetHideScrollbars()) {
     UpdateScrollbarLayer(kHorizontalScrollbar);
@@ -674,7 +812,7 @@ void VisualViewport::InitializeScrollbars() {
 EScrollbarWidth VisualViewport::CSSScrollbarWidth() const {
   DCHECK(IsActiveViewport());
   if (Document* main_document = LocalMainFrame().GetDocument())
-    return main_document->GetLayoutView()->StyleRef().UsedScrollbarWidth();
+    return main_document->GetLayoutView()->Style().UsedScrollbarWidth();
 
   return EScrollbarWidth::kAuto;
 }
@@ -683,7 +821,7 @@ std::optional<blink::Color> VisualViewport::CSSScrollbarThumbColor() const {
   DCHECK(IsActiveViewport());
   if (Document* main_document = LocalMainFrame().GetDocument()) {
     return main_document->GetLayoutView()
-        ->StyleRef()
+        ->Style()
         .ScrollbarThumbColorResolved();
   }
 
@@ -708,35 +846,62 @@ void VisualViewport::UpdateScrollbarLayer(ScrollbarOrientation orientation) {
   bool is_horizontal = orientation == kHorizontalScrollbar;
   scoped_refptr<cc::SolidColorScrollbarLayer>& scrollbar_layer =
       is_horizontal ? scrollbar_layer_horizontal_ : scrollbar_layer_vertical_;
-  if (!scrollbar_layer) {
-    auto& theme = ScrollbarThemeOverlayMobile::GetInstance();
-    float scale = ScaleFromDIP();
-    int thumb_thickness = theme.ThumbThickness(scale, CSSScrollbarWidth());
-    int scrollbar_margin = theme.ScrollbarMargin(scale, CSSScrollbarWidth());
-    cc::ScrollbarOrientation cc_orientation =
-        orientation == kHorizontalScrollbar
-            ? cc::ScrollbarOrientation::kHorizontal
-            : cc::ScrollbarOrientation::kVertical;
-    scrollbar_layer = cc::SolidColorScrollbarLayer::Create(
-        cc_orientation, thumb_thickness, scrollbar_margin,
-        /*is_left_side_vertical_scrollbar*/ false);
-    scrollbar_layer->SetElementId(GetScrollbarElementId(orientation));
-    scrollbar_layer->SetScrollElementId(scroll_layer_->element_id());
-    scrollbar_layer->SetIsDrawable(true);
+  scoped_refptr<ScrollbarDelegate>& scrollbar_delegate =
+      is_horizontal ? scrollbar_delegate_horizontal_
+                    : scrollbar_delegate_vertical_;
+  if (!scrollbar_delegate) {
+    scrollbar_delegate =
+        base::MakeRefCounted<ScrollbarDelegate>(*this, orientation);
   }
+  scrollbar_delegate->SetThumbNeedsRepaint();
+  scrollbar_layer = cc::SolidColorScrollbarLayer::CreateOrReuse(
+      scrollbar_delegate, scrollbar_layer.get());
+  scrollbar_layer->SetElementId(GetScrollbarElementId(orientation));
+  scrollbar_layer->SetScrollElementId(scroll_layer_->element_id());
+  scrollbar_layer->SetIsDrawable(true);
 
   scrollbar_layer->SetBounds(
-      orientation == kHorizontalScrollbar
-          ? gfx::Size(size_.width() - ScrollbarThickness(),
-                      ScrollbarThickness())
-          : gfx::Size(ScrollbarThickness(),
-                      size_.height() - ScrollbarThickness()));
-
-  UpdateScrollbarColor(*scrollbar_layer);
+      is_horizontal ? gfx::Size(size_.width() - ScrollbarThickness(),
+                                ScrollbarThickness())
+                    : gfx::Size(ScrollbarThickness(),
+                                size_.height() - ScrollbarThickness()));
+  scrollbar_layer->SetNeedsDisplay();
 }
 
 bool VisualViewport::VisualViewportSuppliesScrollbars() const {
-  return IsActiveViewport() && GetPage().GetSettings().GetViewportEnabled();
+  // Only the active viewport should supply scrollbars.
+  if (!IsActiveViewport()) {
+    return false;
+  }
+
+  const auto& settings = GetPage().GetSettings();
+
+  // If we are forcing mobile-style scrollbars (can be set by emulation of
+  // overlay scrollbars or mobile emulation), the VisualViewport must supply
+  // them regardless of other settings.
+  if (settings.GetForceAndroidOverlayScrollbar()) {
+    return true;
+  }
+
+  // The VisualViewport is distinct from the LayoutViewport only when the
+  // mobile-style viewport logic is enabled. On desktop, the LayoutViewport
+  // handles all scrollbars.
+  if (!settings.GetViewportEnabled()) {
+    return false;
+  }
+
+  // Even if the mobile viewport is enabled, on "desktop Android" (e.g.
+  // large screen optimizations), we prefer the LayoutViewport to handle
+  // scrollbars for a desktop-like experience.
+  if (ScrollbarTheme::DesktopAndroidScrollbarsEnabled()) {
+    return false;
+  }
+
+  // If none of the above conditions are met, we are in the standard mobile
+  // behavior (ViewportEnabled is true, and DesktopAndroidScrollbarsEnabled is
+  // false). In this case, the VisualViewport is distinct from the
+  // LayoutViewport and handles the "screen" scrollbars.
+  return true;
 }
 
 const Document* VisualViewport::GetDocument() const {
@@ -755,19 +920,16 @@ ChromeClient* VisualViewport::GetChromeClient() const {
   return &GetPage().GetChromeClient();
 }
 
-SmoothScrollSequencer* VisualViewport::GetSmoothScrollSequencer() const {
-  if (!IsActiveViewport())
-    return nullptr;
-  return LocalMainFrame().GetSmoothScrollSequencer();
-}
-
-bool VisualViewport::SetScrollOffset(
+bool VisualViewport::SetScrollOffsetInternal(
     const ScrollOffset& offset,
     mojom::blink::ScrollType scroll_type,
+    cc::ScrollSourceType source_type,
     mojom::blink::ScrollBehavior scroll_behavior,
-    ScrollCallback on_finish) {
+    bool targeted_scroll,
+    std::unique_ptr<ScrollPromiseResolver::ActiveScrollTracker>
+        scroll_tracker) {
   // We clamp the offset here, because the ScrollAnimator may otherwise be
-  // set to a non-clamped offset by ScrollableArea::setScrollOffset,
+  // set to a non-clamped offset by ScrollableArea::setScrollOffsetInternal,
   // which may lead to incorrect scrolling behavior in RootFrameViewport down
   // the line.
   // TODO(eseckler): Solve this instead by ensuring that ScrollableArea and
@@ -775,16 +937,9 @@ bool VisualViewport::SetScrollOffset(
   // stores fractional offsets and that truncation happens elsewhere, see
   // crbug.com/626315.
   ScrollOffset new_scroll_offset = ClampScrollOffset(offset);
-  return ScrollableArea::SetScrollOffset(new_scroll_offset, scroll_type,
-                                         scroll_behavior, std::move(on_finish));
-}
-
-bool VisualViewport::SetScrollOffset(
-    const ScrollOffset& offset,
-    mojom::blink::ScrollType scroll_type,
-    mojom::blink::ScrollBehavior scroll_behavior) {
-  return SetScrollOffset(offset, scroll_type, scroll_behavior,
-                         ScrollCallback());
+  return ScrollableArea::SetScrollOffsetInternal(
+      new_scroll_offset, scroll_type, source_type, scroll_behavior,
+      /*targeted_scroll=*/false, std::move(scroll_tracker));
 }
 
 PhysicalOffset VisualViewport::LocalToScrollOriginOffset() const {
@@ -794,9 +949,12 @@ PhysicalOffset VisualViewport::LocalToScrollOriginOffset() const {
 PhysicalRect VisualViewport::ScrollIntoView(
     const PhysicalRect& rect_in_absolute,
     const PhysicalBoxStrut& scroll_margin,
-    const mojom::blink::ScrollIntoViewParamsPtr& params) {
-  if (!IsActiveViewport())
+    const mojom::blink::ScrollIntoViewParamsPtr& params,
+    std::unique_ptr<ScrollPromiseResolver::ActiveScrollTracker>
+        scroll_tracker) {
+  if (!IsActiveViewport()) {
     return rect_in_absolute;
+  }
 
   ScrollOffset new_scroll_offset =
       ClampScrollOffset(scroll_into_view_util::GetScrollOffsetToExpose(
@@ -804,20 +962,9 @@ PhysicalRect VisualViewport::ScrollIntoView(
           *params->align_y.get()));
 
   if (new_scroll_offset != GetScrollOffset()) {
-    if (params->is_for_scroll_sequence) {
-      if (RuntimeEnabledFeatures::MultiSmoothScrollIntoViewEnabled()) {
-        SetScrollOffset(new_scroll_offset, params->type, params->behavior);
-      } else {
-        DCHECK(params->type == mojom::blink::ScrollType::kProgrammatic ||
-               params->type == mojom::blink::ScrollType::kUser);
-        CHECK(GetSmoothScrollSequencer());
-        GetSmoothScrollSequencer()->QueueAnimation(this, new_scroll_offset,
-                                                   params->behavior);
-      }
-    } else {
-      SetScrollOffset(new_scroll_offset, params->type, params->behavior,
-                      ScrollCallback());
-    }
+    SetScrollOffsetInternal(
+        new_scroll_offset, params->type, cc::ScrollSourceType::kAbsoluteScroll,
+        params->behavior, /*targeted_scroll=*/false, std::move(scroll_tracker));
   }
 
   return rect_in_absolute;
@@ -850,17 +997,26 @@ ScrollOffset VisualViewport::MaximumScrollOffsetAtScale(float scale) const {
   // crbug.com/470718.
   gfx::SizeF frame_view_size(ContentsSize());
 
-  if (browser_controls_adjustment_) {
+  // Match the combined browser controls delta the compositor applies in
+  // LayerTreeImpl::UpdateViewportContainerSizes(). The top contribution
+  // arrives via SetBrowserControlsAdjustment() since it also affects
+  // VisibleRect(); bottom controls never affect VisibleRect(), so read
+  // their contribution directly.
+  const float scroll_bounds_adjustment =
+      browser_controls_adjustment_ +
+      GetPage().GetBrowserControls().UnreportedBottomSizeAdjustment();
+
+  if (scroll_bounds_adjustment) {
     float min_scale =
         GetPage().GetPageScaleConstraintsSet().FinalConstraints().minimum_scale;
-    frame_view_size.Enlarge(0, browser_controls_adjustment_ / min_scale);
+    frame_view_size.Enlarge(0, scroll_bounds_adjustment / min_scale);
   }
 
   frame_view_size.Scale(scale);
   frame_view_size = gfx::SizeF(ToFlooredSize(frame_view_size));
 
   gfx::SizeF viewport_size(size_);
-  viewport_size.Enlarge(0, ceilf(browser_controls_adjustment_));
+  viewport_size.Enlarge(0, ceilf(scroll_bounds_adjustment));
 
   gfx::SizeF max_position = frame_view_size - viewport_size;
   max_position.Scale(1 / scale);
@@ -951,15 +1107,17 @@ scoped_refptr<base::SingleThreadTaskRunner> VisualViewport::GetTimerTaskRunner()
 mojom::blink::ColorScheme VisualViewport::UsedColorSchemeScrollbars() const {
   DCHECK(IsActiveViewport());
   if (Document* main_document = LocalMainFrame().GetDocument())
-    return main_document->GetLayoutView()->StyleRef().UsedColorScheme();
+    return main_document->GetLayoutView()->Style().UsedColorScheme();
 
   return mojom::blink::ColorScheme::kLight;
 }
 
 void VisualViewport::UpdateScrollOffset(const ScrollOffset& position,
-                                        mojom::blink::ScrollType scroll_type) {
+                                        mojom::blink::ScrollType scroll_type,
+                                        cc::ScrollSourceType source_type) {
   if (!DidSetScaleOrLocation(scale_, is_pinch_gesture_active_,
-                             gfx::PointAtOffsetFromOrigin(position))) {
+                             gfx::PointAtOffsetFromOrigin(position),
+                             scroll_type)) {
     return;
   }
   if (IsExplicitScrollType(scroll_type))
@@ -1033,7 +1191,8 @@ bool VisualViewport::ScheduleAnimation() {
 }
 
 void VisualViewport::ClampToBoundaries() {
-  SetLocation(gfx::PointAtOffsetFromOrigin(offset_));
+  SetLocation(gfx::PointAtOffsetFromOrigin(offset_),
+              mojom::blink::ScrollType::kClamping);
 }
 
 gfx::RectF VisualViewport::ViewportToRootFrame(
@@ -1153,7 +1312,7 @@ PaintArtifactCompositor* VisualViewport::GetPaintArtifactCompositor() const {
 
 std::unique_ptr<TracedValue> VisualViewport::ViewportToTracedValue() const {
   auto value = std::make_unique<TracedValue>();
-  gfx::Rect viewport = VisibleContentRect();
+  gfx::Rect viewport = VisibleContentRect(kExcludeScrollbars);
   value->SetInteger("x", ClampTo<int>(roundf(viewport.x())));
   value->SetInteger("y", ClampTo<int>(roundf(viewport.y())));
   value->SetInteger("width", ClampTo<int>(roundf(viewport.width())));
@@ -1168,6 +1327,8 @@ void VisualViewport::DisposeImpl() {
   scroll_layer_.reset();
   scrollbar_layer_horizontal_.reset();
   scrollbar_layer_vertical_.reset();
+  scrollbar_delegate_horizontal_.reset();
+  scrollbar_delegate_vertical_.reset();
   device_emulation_transform_node_ = nullptr;
   overscroll_elasticity_transform_node_ = nullptr;
   page_scale_node_ = nullptr;
@@ -1218,21 +1379,28 @@ void VisualViewport::UsedColorSchemeChanged() {
   DCHECK(IsActiveViewport());
   // The scrollbar overlay color theme depends on the used color scheme.
   RecalculateOverlayScrollbarColorScheme();
+  ScrollbarColorChanged();
 }
 
 void VisualViewport::ScrollbarColorChanged() {
   DCHECK(IsActiveViewport());
   if (scrollbar_layer_horizontal_) {
     DCHECK(scrollbar_layer_vertical_);
-    UpdateScrollbarColor(*scrollbar_layer_horizontal_);
-    UpdateScrollbarColor(*scrollbar_layer_vertical_);
+    UpdateScrollbarLayer(kHorizontalScrollbar);
+    UpdateScrollbarLayer(kVerticalScrollbar);
   }
 }
 
-void VisualViewport::UpdateScrollbarColor(cc::SolidColorScrollbarLayer& layer) {
-  auto& theme = ScrollbarThemeOverlayMobile::GetInstance();
-  layer.SetColor(
-      CSSScrollbarThumbColor().value_or(theme.DefaultColor()).toSkColor4f());
+SkColor4f VisualViewport::ScrollbarThumbColor() const {
+  const auto* color_provider = GetPage().GetColorProviderForPainting(
+      GetOverlayScrollbarColorScheme(),
+      GetPage().GetSettings().GetInForcedColors());
+  WebThemeEngine::ExtraParams params =
+      WebThemeEngine::ScrollbarThumbExtraParams();
+  Color default_color = Color::FromSkColor4f(
+      WebThemeEngineHelper::GetNativeThemeEngine()->GetScrollbarThumbColor(
+          WebThemeEngine::kStateNormal, &params, color_provider));
+  return CSSScrollbarThumbColor().value_or(default_color).toSkColor4f();
 }
 
 }  // namespace blink

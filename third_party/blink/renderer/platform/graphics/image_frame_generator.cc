@@ -29,7 +29,6 @@
 #include <memory>
 #include <utility>
 
-#include "base/not_fatal_until.h"
 #include "base/synchronization/lock.h"
 #include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/renderer/platform/graphics/image_decoder_wrapper.h"
@@ -65,12 +64,12 @@ static bool UpdateYUVAInfoSubsamplingAndWidthBytes(
     ImageDecoder* decoder,
     SkYUVAInfo::Subsampling* subsampling,
     base::span<size_t, SkYUVAInfo::kMaxPlanes> component_width_bytes) {
-  SkYUVAInfo::Subsampling tempSubsampling =
+  SkYUVAInfo::Subsampling temp_subsampling =
       SubsamplingToSkiaSubsampling(decoder->GetYUVSubsampling());
-  if (tempSubsampling == SkYUVAInfo::Subsampling::kUnknown) {
+  if (temp_subsampling == SkYUVAInfo::Subsampling::kUnknown) {
     return false;
   }
-  *subsampling = tempSubsampling;
+  *subsampling = temp_subsampling;
   component_width_bytes[0] = decoder->DecodedYUVWidthBytes(cc::YUVIndex::kY);
   component_width_bytes[1] = decoder->DecodedYUVWidthBytes(cc::YUVIndex::kU);
   component_width_bytes[2] = decoder->DecodedYUVWidthBytes(cc::YUVIndex::kV);
@@ -111,10 +110,11 @@ bool ImageFrameGenerator::DecodeAndScale(
     wtf_size_t index,
     const SkPixmap& pixmap,
     cc::PaintImage::GeneratorClientId client_id) {
+  if (decode_failed_.load()) {
+    return false;
+  }
   {
     base::AutoLock lock(generator_lock_);
-    if (decode_failed_)
-      return false;
     RecordWhetherMultiDecoded(client_id);
   }
 
@@ -126,7 +126,6 @@ bool ImageFrameGenerator::DecodeAndScale(
   const SkISize scaled_size = pixmap.dimensions();
   CHECK(GetSupportedDecodeSize(scaled_size) == scaled_size);
 
-  wtf_size_t frame_count = 0u;
   bool has_alpha = true;
 
   // |decode_failed| indicates a failure due to a corrupt image.
@@ -141,14 +140,14 @@ bool ImageFrameGenerator::DecodeAndScale(
     ImageDecoderWrapper decoder_wrapper(this, data, pixmap,
                                         decoder_color_behavior_, aux_image_,
                                         index, all_data_received, client_id);
-    current_decode_succeeded = decoder_wrapper.Decode(
-        image_decoder_factory_.get(), &frame_count, &has_alpha);
+    current_decode_succeeded =
+        decoder_wrapper.Decode(image_decoder_factory_.get(), &has_alpha);
     decode_failed = decoder_wrapper.decode_failed();
   }
 
   base::AutoLock lock(generator_lock_);
-  decode_failed_ = decode_failed;
-  if (decode_failed_) {
+  decode_failed_.store(decode_failed);
+  if (decode_failed) {
     DCHECK(!current_decode_succeeded);
     return false;
   }
@@ -157,9 +156,6 @@ bool ImageFrameGenerator::DecodeAndScale(
     return false;
 
   SetHasAlpha(index, has_alpha);
-  if (frame_count != 0u)
-    frame_count_ = frame_count;
-
   return true;
 }
 
@@ -179,8 +175,9 @@ bool ImageFrameGenerator::DecodeToYUV(
   // TODO (scroggo): The only interesting thing this uses from the
   // ImageFrameGenerator is |decode_failed_|. Move this into
   // DecodingImageGenerator, which is the only class that calls it.
-  if (decode_failed_ || yuv_decoding_failed_)
+  if (decode_failed_.load() || yuv_decoding_failed_.load()) {
     return false;
+  }
 
   if (!planes.data() || !planes[0] || !planes[1] || !planes[2] ||
       !row_bytes.data() || !row_bytes[0] || !row_bytes[1] || !row_bytes[2]) {
@@ -220,15 +217,14 @@ bool ImageFrameGenerator::DecodeToYUV(
   // This may not be the case once YUV supports incremental decoding
   // (crbug.com/943519).
   if (decoder->Failed()) {
-    yuv_decoding_failed_ = true;
+    yuv_decoding_failed_.store(true);
   }
 
   return false;
 }
 
 void ImageFrameGenerator::SetHasAlpha(wtf_size_t index, bool has_alpha) {
-  generator_lock_.AssertAcquired();
-
+  base::AutoLock lock(has_alpha_lock_);
   if (index >= has_alpha_.size()) {
     const wtf_size_t old_size = has_alpha_.size();
     has_alpha_.resize(index + 1);
@@ -259,9 +255,8 @@ void ImageFrameGenerator::RecordWhetherMultiDecoded(
   }
 }
 
-bool ImageFrameGenerator::HasAlpha(wtf_size_t index) {
-  base::AutoLock lock(generator_lock_);
-
+bool ImageFrameGenerator::HasAlpha(wtf_size_t index) const {
+  base::AutoLock lock(has_alpha_lock_);
   if (index < has_alpha_.size())
     return has_alpha_[index];
   return true;
@@ -276,8 +271,9 @@ bool ImageFrameGenerator::GetYUVAInfo(
 
   base::AutoLock lock(generator_lock_);
 
-  if (yuv_decoding_failed_)
+  if (yuv_decoding_failed_.load()) {
     return false;
+  }
   std::unique_ptr<ImageDecoder> decoder = ImageDecoder::Create(
       data, /*data_complete=*/true, ImageDecoder::kAlphaPremultiplied,
       ImageDecoder::kDefaultBitDepth, decoder_color_behavior_, aux_image_,
@@ -294,26 +290,26 @@ bool ImageFrameGenerator::GetYUVAInfo(
   }
   SkYUVAInfo yuva_info(full_size_, SkYUVAInfo::PlaneConfig::kY_U_V, subsampling,
                        decoder->GetYUVColorSpace());
-  SkYUVAPixmapInfo::DataType dataType;
+  SkYUVAPixmapInfo::DataType data_type;
   if (decoder->GetYUVBitDepth() > 8) {
     if (supported_data_types.supported(SkYUVAInfo::PlaneConfig::kY_U_V,
                                        SkYUVAPixmapInfo::DataType::kUnorm16)) {
-      dataType = SkYUVAPixmapInfo::DataType::kUnorm16;
+      data_type = SkYUVAPixmapInfo::DataType::kUnorm16;
     } else if (supported_data_types.supported(
                    SkYUVAInfo::PlaneConfig::kY_U_V,
                    SkYUVAPixmapInfo::DataType::kFloat16)) {
-      dataType = SkYUVAPixmapInfo::DataType::kFloat16;
+      data_type = SkYUVAPixmapInfo::DataType::kFloat16;
     } else {
       return false;
     }
   } else if (supported_data_types.supported(
                  SkYUVAInfo::PlaneConfig::kY_U_V,
                  SkYUVAPixmapInfo::DataType::kUnorm8)) {
-    dataType = SkYUVAPixmapInfo::DataType::kUnorm8;
+    data_type = SkYUVAPixmapInfo::DataType::kUnorm8;
   } else {
     return false;
   }
-  *info = SkYUVAPixmapInfo(yuva_info, dataType, width_bytes.data());
+  *info = SkYUVAPixmapInfo(yuva_info, data_type, width_bytes.data());
   DCHECK(info->isSupported(supported_data_types));
 
   return true;
@@ -357,7 +353,7 @@ ImageFrameGenerator::ClientAutoLock::~ClientAutoLock() {
 
   base::AutoLock lock(generator_->generator_lock_);
   auto it = generator_->lock_map_.find(client_id_);
-  CHECK(it != generator_->lock_map_.end(), base::NotFatalUntil::M130);
+  CHECK(it != generator_->lock_map_.end());
   it->value->ref_count--;
 
   if (it->value->ref_count == 0)

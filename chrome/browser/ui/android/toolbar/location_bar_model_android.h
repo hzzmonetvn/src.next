@@ -21,33 +21,30 @@ class LocationBarModelAndroid : public ChromeLocationBarModelDelegate {
  public:
   LocationBarModelAndroid() = delete;
 
-  LocationBarModelAndroid(JNIEnv* env,
-                          const base::android::JavaRef<jobject>& obj);
+  explicit LocationBarModelAndroid(const jni_zero::JavaRef<jobject>& obj);
 
   LocationBarModelAndroid(const LocationBarModelAndroid&) = delete;
   LocationBarModelAndroid& operator=(const LocationBarModelAndroid&) = delete;
 
   ~LocationBarModelAndroid() override;
 
-  void Destroy(JNIEnv* env, const base::android::JavaParamRef<jobject>& obj);
-  base::android::ScopedJavaLocalRef<jstring> GetFormattedFullURL(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj);
-  base::android::ScopedJavaLocalRef<jstring> GetURLForDisplay(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj);
-  base::android::ScopedJavaLocalRef<jobject> GetUrlOfVisibleNavigationEntry(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj);
-  jint GetPageClassification(JNIEnv* env, bool is_prefetch) const;
+  void Destroy();
+  std::u16string GetFormattedFullURL();
+  std::u16string GetURLForDisplay();
+  GURL GetUrlOfVisibleNavigationEntry();
+  int32_t GetPageClassification(bool is_prefetch) const;
 
   // ChromeLocationBarModelDelegate:
   content::WebContents* GetActiveWebContents() const override;
   bool IsNewTabPage() const override;
+  bool ShouldTrimDisplayUrlAfterHostName() const override;
+
+ protected:
+  virtual bool IsToolbarUiRefactorEnabled() const;
 
  private:
   std::unique_ptr<LocationBarModel> location_bar_model_;
-  base::android::ScopedJavaGlobalRef<jobject> java_object_;
+  jni_zero::ScopedJavaGlobalRef<jobject> java_object_;
 };
 
 #endif  // CHROME_BROWSER_UI_ANDROID_TOOLBAR_LOCATION_BAR_MODEL_ANDROID_H_

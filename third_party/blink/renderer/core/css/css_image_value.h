@@ -21,10 +21,10 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_CSS_CSS_IMAGE_VALUE_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_CSS_CSS_IMAGE_VALUE_H_
 
-#include "base/memory/scoped_refptr.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/css/css_url_data.h"
 #include "third_party/blink/renderer/core/css/css_value.h"
+#include "third_party/blink/renderer/platform/heap/collection_support/heap_hash_map.h"
 #include "third_party/blink/renderer/platform/loader/fetch/cross_origin_attribute_value.h"
 #include "third_party/blink/renderer/platform/loader/fetch/fetch_parameters.h"
 #include "third_party/blink/renderer/platform/wtf/casting.h"
@@ -32,65 +32,77 @@
 namespace blink {
 
 class Document;
+class ResourceFetcher;
 class StyleImage;
 class SVGResource;
 
 class CORE_EXPORT CSSImageValue : public CSSValue {
  public:
-  CSSImageValue(CSSUrlData url_data,
-                StyleImage* image = nullptr);
+  // Optionally accepts a pre-resolved `fetcher_agnostic_image` that should not
+  // be associated with a `ResourceFetcher`. It will be made
+  // available as a fallback to all callers checking for an already resolved
+  // `StyleImage` (`IsCachePending` / `CachedImage(ResourceFetcher*)`). Callers
+  // that are potentially attempting a new fetch (`CacheImage(Document&...)`)
+  // will still proceed with their own, and the result will take precedence over
+  // this value.
+  //
+  // At the time of this writing, this option is used exclusively by
+  // `StyleFetchedImage::CssValue()` to expose an already-fetched,
+  // document-scoped image to fetcher-less consumers such as CSS paint/layout
+  // worklets and other cross-thread Typed OM readers.
+  CSSImageValue(const CSSUrlData& url_data,
+                StyleImage* fetcher_agnostic_image = nullptr);
   ~CSSImageValue();
 
-  bool IsCachePending() const { return !cached_image_; }
-  StyleImage* CachedImage() const {
-    DCHECK(!IsCachePending());
-    return cached_image_.Get();
-  }
+  bool IsCachePending(ResourceFetcher* fetcher) const;
+  StyleImage* CachedImage(ResourceFetcher* fetcher) const;
   FetchParameters PrepareFetch(const Document&,
-                               FetchParameters::ImageRequestBehavior,
                                CrossOriginAttributeValue) const;
   StyleImage* CacheImage(
-      const Document&,
-      FetchParameters::ImageRequestBehavior,
+      Document&,
       CrossOriginAttributeValue = kCrossOriginAttributeNotSet,
       const float override_image_resolution = 0.0f);
 
-  const String& RelativeUrl() const { return url_data_.UnresolvedUrl(); }
+  const String& RelativeUrl() const { return UrlData().UnresolvedUrl(); }
   bool IsLocal(const Document&) const;
   AtomicString NormalizedFragmentIdentifier() const;
+  const CSSUrlData& UrlData() const { return *url_data_; }
 
   void ReResolveURL(const Document&) const;
 
   String CustomCSSText() const;
 
-  bool HasFailedOrCanceledSubresources() const;
+  bool HasFailedOrCanceledSubresources(ResourceFetcher*) const;
 
   bool Equals(const CSSImageValue&) const;
 
-  CSSImageValue* ComputedCSSValue() const {
-    return MakeGarbageCollected<CSSImageValue>(url_data_.MakeAbsolute(),
-                                               cached_image_.Get());
-  }
-  CSSImageValue* ComputedCSSValueMaybeLocal() const;
+  CSSImageValue* ComputedCSSValue() const;
 
-  CSSImageValue* Clone() const {
-    return MakeGarbageCollected<CSSImageValue>(url_data_.MakeWithoutReferrer(),
-                                               cached_image_.Get());
-  }
+  CSSImageValue* Clone() const;
 
   void SetInitiator(const AtomicString& name) { initiator_name_ = name; }
 
   void TraceAfterDispatch(blink::Visitor*) const;
   void RestoreCachedResourceIfNeeded(const Document&) const;
-  SVGResource* EnsureSVGResource() const;
+  SVGResource* EnsureSVGResource(ResourceFetcher*) const;
 
  private:
-  CSSUrlData url_data_;
+  static CSSImageValue* Copy(const CSSImageValue& other,
+                             const CSSUrlData& url_data);
+
   AtomicString initiator_name_;
+  const Member<const CSSUrlData> url_data_;
 
   // Cached image data.
+  // fetcher_agnostic_image_ is the lowest-priority fallback image. See the
+  // comment on the constructor for more details.
+  Member<StyleImage> fetcher_agnostic_image_;
   mutable Member<StyleImage> cached_image_;
+  mutable HeapHashMap<WeakMember<ResourceFetcher>, Member<StyleImage>>
+      cached_images_;
   mutable Member<SVGResource> svg_resource_;
+  mutable HeapHashMap<WeakMember<ResourceFetcher>, Member<SVGResource>>
+      svg_resources_;
 };
 
 template <>

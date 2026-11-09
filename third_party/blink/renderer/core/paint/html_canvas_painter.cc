@@ -23,8 +23,10 @@ InterpolationQuality InterpolationQualityForCanvas(const ComputedStyle& style) {
   if (style.ImageRendering() == EImageRendering::kWebkitOptimizeContrast)
     return kInterpolationLow;
 
-  if (style.ImageRendering() == EImageRendering::kPixelated)
+  if (style.ImageRendering() == EImageRendering::kPixelated ||
+      style.ImageRendering() == EImageRendering::kCrispEdges) {
     return kInterpolationNone;
+  }
 
   return CanvasDefaultInterpolationQuality;
 }
@@ -39,9 +41,29 @@ void HTMLCanvasPainter::PaintReplaced(const PaintInfo& paint_info,
   paint_rect.Move(paint_offset);
 
   auto* canvas = To<HTMLCanvasElement>(layout_html_canvas_.GetNode());
+  if (paint_info.IsReadBackAllowedRendering() && !canvas->OriginClean()) {
+    return;
+  }
+
   if (!canvas->IsCanvasClear()) {
     PaintTiming::From(layout_html_canvas_.GetDocument())
         .MarkFirstContentfulPaint();
+  }
+
+  if (canvas->IsInCanvasSubtree()) {
+    if (DrawingRecorder::UseCachedDrawingIfPossible(
+            context, layout_html_canvas_, paint_info.phase)) {
+      return;
+    }
+    BoxDrawingRecorder recorder(context, layout_html_canvas_, paint_info.phase,
+                                paint_offset);
+    // For nested canvases in a canvas subtree, record a placeholder
+    // CustomDataOp with the DOMNodeId. When GetCanvasDrawablePaintRecord() is
+    // called, this placeholder is replaced with the nested canvas's actual
+    // unaccelerated snapshot.
+    context.Canvas()->recordCustomData(
+        static_cast<uint32_t>(canvas->GetDomNodeId()));
+    return;
   }
 
   if (auto* layer = canvas->ContentsCcLayer()) {
@@ -70,14 +92,15 @@ void HTMLCanvasPainter::PaintReplaced(const PaintInfo& paint_info,
   }
 
   if (DrawingRecorder::UseCachedDrawingIfPossible(context, layout_html_canvas_,
-                                                  paint_info.phase))
+                                                  paint_info.phase)) {
     return;
+  }
 
   BoxDrawingRecorder recorder(context, layout_html_canvas_, paint_info.phase,
                               paint_offset);
   ScopedImageRenderingSettings image_rendering_settings_scope(
-      context, InterpolationQualityForCanvas(layout_html_canvas_.StyleRef()),
-      layout_html_canvas_.StyleRef().GetDynamicRangeLimit());
+      context, InterpolationQualityForCanvas(layout_html_canvas_.Style()),
+      layout_html_canvas_.Style().GetDynamicRangeLimit());
   canvas->Paint(context, paint_rect, paint_info.ShouldOmitCompositingInfo());
 }
 

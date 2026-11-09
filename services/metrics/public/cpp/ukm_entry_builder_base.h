@@ -5,10 +5,11 @@
 #ifndef SERVICES_METRICS_PUBLIC_CPP_UKM_ENTRY_BUILDER_BASE_H_
 #define SERVICES_METRICS_PUBLIC_CPP_UKM_ENTRY_BUILDER_BASE_H_
 
+#include "mojo/public/cpp/bindings/struct_ptr.h"
 #include "services/metrics/public/cpp/metrics_export.h"
 #include "services/metrics/public/cpp/ukm_recorder.h"
 #include "services/metrics/public/cpp/ukm_source_id.h"
-#include "services/metrics/public/mojom/ukm_interface.mojom.h"
+#include "services/metrics/public/mojom/ukm_interface.mojom-forward.h"
 
 namespace ukm::internal {
 
@@ -32,7 +33,7 @@ class METRICS_EXPORT UkmEntryBuilderBase {
   mojom::UkmEntryPtr GetEntryForTesting();
 
   // Transfers ownership of |entry_| externally.
-  mojom::UkmEntryPtr TakeEntry() { return std::move(entry_); }
+  mojom::UkmEntryPtr TakeEntry();
 
  protected:
   UkmEntryBuilderBase(ukm::SourceIdObj source_id, uint64_t event_hash);

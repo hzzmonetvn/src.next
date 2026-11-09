@@ -5,11 +5,10 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_FRAME_FIND_IN_PAGE_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_FRAME_FIND_IN_PAGE_H_
 
+#include "base/memory/raw_ptr.h"
 #include "build/build_config.h"
-#include "mojo/public/cpp/bindings/associated_receiver.h"
 #include "mojo/public/cpp/bindings/pending_associated_receiver.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
-#include "mojo/public/cpp/bindings/remote.h"
 #include "third_party/blink/public/mojom/frame/find_in_page.mojom-blink.h"
 #include "third_party/blink/public/platform/interface_registry.h"
 #include "third_party/blink/public/platform/web_common.h"
@@ -22,11 +21,11 @@
 #include "third_party/blink/renderer/platform/heap/persistent.h"
 #include "third_party/blink/renderer/platform/mojo/heap_mojo_associated_receiver.h"
 #include "third_party/blink/renderer/platform/mojo/heap_mojo_remote.h"
-#include "third_party/blink/renderer/platform/wtf/gc_plugin.h"
 
 namespace blink {
 
 class WebLocalFrameImpl;
+class WebPluginContainerImpl;
 
 class CORE_EXPORT FindInPage final : public GarbageCollected<FindInPage>,
                                      public mojom::blink::FindInPage {
@@ -45,7 +44,7 @@ class CORE_EXPORT FindInPage final : public GarbageCollected<FindInPage>,
   // layout space, which means they differ by device scale factor from the
   // CSS space.
   void SetTickmarks(const WebElement& target,
-                    const WebVector<gfx::Rect>& tickmarks_in_layout_space);
+                    const std::vector<gfx::Rect>& tickmarks_in_layout_space);
 
   int FindMatchMarkersVersion() const;
 
@@ -86,9 +85,9 @@ class CORE_EXPORT FindInPage final : public GarbageCollected<FindInPage>,
   // Otherwise creates it and then returns.
   TextFinder& EnsureTextFinder();
 
-  void SetPluginFindHandler(WebPluginContainer* plugin);
+  void SetPluginFindHandler(WebPluginContainerImpl* plugin);
 
-  WebPluginContainer* PluginFindHandler() const;
+  WebPluginContainerImpl* PluginFindHandler() const;
 
   WebPlugin* GetWebPluginForFind();
 
@@ -97,18 +96,13 @@ class CORE_EXPORT FindInPage final : public GarbageCollected<FindInPage>,
 
   void Dispose();
 
-  void Trace(Visitor* visitor) const {
-    visitor->Trace(text_finder_);
-    visitor->Trace(frame_);
-    visitor->Trace(client_);
-    visitor->Trace(receiver_);
-  }
+  void Trace(Visitor* visitor) const;
 
  private:
   // Will be initialized after first call to ensureTextFinder().
   Member<TextFinder> text_finder_;
 
-  WebPluginContainer* plugin_find_handler_;
+  Member<WebPluginContainerImpl> plugin_find_handler_;
 
   const Member<WebLocalFrameImpl> frame_;
 

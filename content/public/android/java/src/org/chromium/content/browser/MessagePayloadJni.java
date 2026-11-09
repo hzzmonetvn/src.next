@@ -4,23 +4,27 @@
 
 package org.chromium.content.browser;
 
-import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
+import android.system.ErrnoException;
 
 import org.jni_zero.CalledByNative;
+import org.jni_zero.CalledByNativeForTesting;
 import org.jni_zero.JNINamespace;
 
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.content_public.browser.MessagePayload;
 import org.chromium.content_public.browser.MessagePayloadType;
+import org.chromium.content_public.browser.SharedArrayBuffer;
 
 /** Helper class to call MessagePayload methods from native. */
 @JNINamespace("content")
+@NullMarked
 final class MessagePayloadJni {
     private MessagePayloadJni() {}
 
     @MessagePayloadType
     @CalledByNative
-    private static int getType(@NonNull MessagePayload payload) {
+    private static int getType(MessagePayload payload) {
         return payload.getType();
     }
 
@@ -30,17 +34,30 @@ final class MessagePayloadJni {
     }
 
     @CalledByNative
-    private static String getAsString(@NonNull MessagePayload payload) {
+    private static @Nullable String getAsString(MessagePayload payload) {
         return payload.getAsString();
     }
 
     @CalledByNative
-    private static MessagePayload createFromArrayBuffer(@NonNull byte[] arrayBuffer) {
+    private static MessagePayload createFromArrayBuffer(byte[] arrayBuffer) {
         return new MessagePayload(arrayBuffer);
     }
 
     @CalledByNative
-    private static byte[] getAsArrayBuffer(@NonNull MessagePayload payload) {
+    private static byte[] getAsArrayBuffer(MessagePayload payload) {
         return payload.getAsArrayBuffer();
+    }
+
+    @CalledByNativeForTesting
+    private static MessagePayload createFromSharedArrayBufferForTesting(byte[] arrayBuffer)
+            throws ErrnoException {
+        SharedArrayBuffer sab = SharedArrayBuffer.allocate(null, arrayBuffer.length);
+        sab.mapAndCreateByteBuffer().put(arrayBuffer);
+        return new MessagePayload(sab);
+    }
+
+    @CalledByNative
+    private static SharedArrayBuffer getAsSharedArrayBuffer(MessagePayload payload) {
+        return payload.getAsSharedArrayBuffer();
     }
 }

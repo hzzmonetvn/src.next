@@ -5,10 +5,10 @@
 #include "chrome/browser/signin/chrome_signin_client_factory.h"
 
 #include "chrome/browser/bookmarks/bookmark_model_factory.h"
-#include "chrome/browser/net/profile_network_context_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
+#include "extensions/buildflags/buildflags.h"
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
 #include "extensions/browser/extension_registry_factory.h"
 #endif
 
@@ -23,11 +23,11 @@ ChromeSigninClientFactory::ChromeSigninClientFactory()
               // TODO(crbug.com/41488885): Check if this service is needed for
               // Ash Internals.
               .WithAshInternals(ProfileSelection::kOriginalOnly)
+              .WithIsolatedMode(ProfileSelection::kOwnInstance)
               .Build()) {
-  DependsOn(ProfileNetworkContextServiceFactory::GetInstance());
   // Used to keep track of bookmark metrics on Signin/Sync.
   DependsOn(BookmarkModelFactory::GetInstance());
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
   // Used to keep track of extensions metrics on Signin/Sync.
   DependsOn(extensions::ExtensionRegistryFactory::GetInstance());
 #endif

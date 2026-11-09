@@ -18,7 +18,6 @@
 #include "base/scoped_observation.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
-#include "chrome/browser/themes/theme_service_observer.h"
 #include "components/history/core/browser/history_types.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "components/ntp_tiles/most_visited_sites.h"
@@ -30,8 +29,8 @@
 #include "ui/native_theme/native_theme_observer.h"
 #include "url/gurl.h"
 
-#if BUILDFLAG(IS_ANDROID)
-#error "Instant is only used on desktop";
+#if !BUILDFLAG(IS_ANDROID)
+#include "chrome/browser/themes/theme_service_observer.h"
 #endif
 
 class InstantServiceObserver;
@@ -56,8 +55,13 @@ class RenderProcessHost;
 class InstantService : public KeyedService,
                        public content::RenderProcessHostObserver,
                        public ntp_tiles::MostVisitedSites::Observer,
-                       public ui::NativeThemeObserver,
-                       public ThemeServiceObserver {
+                       public ui::NativeThemeObserver
+// TODO(b/562623656): Support ThemeService for on Desktop Android.
+#if !BUILDFLAG(IS_ANDROID)
+    ,
+                       public ThemeServiceObserver
+#endif
+{
  public:
   explicit InstantService(Profile* profile);
 
@@ -91,8 +95,10 @@ class InstantService : public KeyedService,
   // items.
   void OnNewTabPageOpened();
 
+#if !BUILDFLAG(IS_ANDROID)
   // ThemeServiceObserver implementation.
   void OnThemeChanged() override;
+#endif
 
   // Most visited item APIs.
   //
@@ -113,12 +119,9 @@ class InstantService : public KeyedService,
   // Getter for |theme_| that will also initialize it if necessary.
   NtpTheme* GetInitializedNtpTheme();
 
-  // Used for testing.
-  void SetNativeThemeForTesting(ui::NativeTheme* theme);
-
  private:
   friend class InstantExtendedTest;
-  friend class InstantUnitTestBase;
+  friend class InstantBrowserTestBase;
   friend class TestInstantService;
 
   FRIEND_TEST_ALL_PREFIXES(InstantServiceTest, GetNTPTileSuggestion);
@@ -135,6 +138,7 @@ class InstantService : public KeyedService,
 
   // ntp_tiles::MostVisitedSites::Observer implementation.
   void OnURLsAvailable(
+      bool is_user_triggered,
       const std::map<ntp_tiles::SectionType, ntp_tiles::NTPTilesVector>&
           sections) override;
   void OnIconMadeAvailable(const GURL& site_url) override;
@@ -179,8 +183,6 @@ class InstantService : public KeyedService,
 
   base::ScopedObservation<ui::NativeTheme, ui::NativeThemeObserver>
       theme_observation_{this};
-
-  raw_ptr<ui::NativeTheme> native_theme_;
 
   base::TimeTicks background_updated_timestamp_;
 

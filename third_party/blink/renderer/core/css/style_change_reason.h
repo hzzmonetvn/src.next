@@ -19,6 +19,7 @@ extern const char kActiveStylesheetsUpdate[];
 extern const char kAffectedByHas[];
 extern const char kAnimation[];
 extern const char kAttribute[];
+extern const char kBodyColorChange[];
 extern const char kConditionalBackdrop[];
 extern const char kControl[];
 extern const char kControlValue[];
@@ -40,6 +41,10 @@ extern const char kInspector[];
 extern const char kKeyframesRuleChange[];
 extern const char kLanguage[];
 extern const char kLinkColorChange[];
+extern const char kMediaQuery[];
+extern const char kNavigationQuery[];
+extern const char kNodeInserted[];
+extern const char kOverscroll[];
 extern const char kPictureSourceChanged[];
 extern const char kPlatformColorChange[];
 extern const char kPluginChanged[];
@@ -75,7 +80,9 @@ extern const AtomicString& g_focus;
 extern const AtomicString& g_focus_visible;
 extern const AtomicString& g_focus_within;
 extern const AtomicString& g_hover;
+
 extern const AtomicString& g_past;
+extern const AtomicString& g_patching;
 extern const AtomicString& g_unresolved;
 
 void Init();

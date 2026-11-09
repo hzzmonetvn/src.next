@@ -12,14 +12,43 @@ namespace prefs {
 inline constexpr char kProfileCreationInterceptionDeclined[] =
     "signin.ProfileCreationInterceptionDeclinedPref";
 
-// Integer pref to store the number of times the password bubble signin promo
-// has been shown per profile while the user is signed out.
-inline constexpr char kPasswordSignInPromoShownCountPerProfile[] =
-    "signin.PasswordSignInPromoShownCount";
+// A timestamp of the last time the history sync promo was dismissed.
+inline constexpr char
+    kHistoryPageHistorySyncPromoLastDismissedTimestampPerProfile[] =
+        "signin.HistoryPageHistorySyncPromoLastDismissedTimestampPerProfile";
+
+// A boolean pref to store whether the history sync promo was shown one time
+// after dismissal.
+inline constexpr char
+    kHistoryPageHistorySyncPromoShownAfterDismissalPerProfile[] =
+        "signin.HistoryPageHistorySyncPromoShownAfterDismissalPerProfile";
+
+// Integer pref to store the number of times the history sync promo has been
+// shown on the history page per profile while the user is signed out.
+inline constexpr char kHistoryPageHistorySyncPromoShownCountPerProfile[] =
+    "signin.HistoryPageHistorySyncPromoShownCount";
+
 // Integer pref to store the number of times any autofill bubble signin promo
-// has been dismissed per profile while the user is signed out.
+// has been dismissed per profile while the user is signed out. This also
+// includes the bookmark bubble after `UnoPhase2FollowUp` is enabled.
 inline constexpr char kAutofillSignInPromoDismissCountPerProfile[] =
     "signin.AutofillSignInPromoDismissCount";
+
+// Integer pref to store the number of times the Search AI Mode bubble signin
+// promo has been shown per profile while the user is signed out.
+inline constexpr char kSearchAIModeSignInPromoShownCountPerProfile[] =
+    "signin.SearchAIModeSignInPromoShownCount";
+
+// Integer pref to store the number of times the Search AI Mode bubble signin
+// promo has been explicitly dismissed per profile while the user is signed out.
+inline constexpr char kSearchAIModeSignInPromoDismissCountPerProfile[] =
+    "signin.SearchAIModeSignInPromoDismissCount";
+
+// A timestamp of the last time the Search AI Mode bubble signin promo was
+// shown.
+inline constexpr char
+    kSearchAIModeSignInPromoLastImpressionTimestampPerProfile[] =
+        "signin.SearchAIModeSignInPromoLastImpressionTimestamp";
 
 }  // namespace prefs
 

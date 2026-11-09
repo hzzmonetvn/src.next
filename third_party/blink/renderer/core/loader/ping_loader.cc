@@ -79,9 +79,15 @@ bool SendBeaconCommon(const ScriptState& state,
   request.SetHttpMethod(http_names::kPOST);
   request.SetKeepalive(true);
   request.SetRequestContext(mojom::blink::RequestContextType::BEACON);
+  // Prevents web service workers from observing isolated world beacons.
+  if (base::FeatureList::IsEnabled(
+          features::kIsolatedWorldEventSourceAndBeaconsSkipServiceWorker)) {
+    request.SetSkipServiceWorker(state.World().IsIsolatedWorld());
+  }
   beacon.Serialize(request);
-  FetchParameters params(std::move(request),
-                         ResourceLoaderOptions(&state.World()));
+  FetchParameters params(
+      std::move(request),
+      ResourceLoaderOptions::CreateForTargetWorld(&state.World()));
   // The spec says:
   //  - If mimeType is not null:
   //   - If mimeType value is a CORS-safelisted request-header value for the
@@ -107,8 +113,9 @@ bool SendBeaconCommon(const ScriptState& state,
 void PingLoader::SendLinkAuditPing(LocalFrame* frame,
                                    const KURL& ping_url,
                                    const KURL& destination_url) {
-  if (!ping_url.ProtocolIsInHTTPFamily())
+  if (!ping_url.ProtocolIsInHttpFamily()) {
     return;
+  }
 
   ResourceRequest request(ping_url);
   request.SetHttpMethod(http_names::kPOST);

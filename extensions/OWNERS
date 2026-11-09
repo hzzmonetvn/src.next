@@ -8,13 +8,18 @@
 #   chrome/common/extensions/OWNERS
 #   chrome/renderer/extensions/OWNERS
 #   chrome/renderer/resources/extensions/OWNERS
+#   chrome/test/data/extensions/OWNERS
 
 set noparent
 rdevlin.cronin@chromium.org
-dbertoni@chromium.org
-emiliapaz@chromium.org
+andreaorru@chromium.org
+evasu@chromium.org
 finnur@chromium.org
-reillyg@chromium.org
+jamescook@chromium.org
+jlulejian@chromium.org
+kelvinjiang@chromium.org
+solomonkinard@chromium.org
+tjudkins@chromium.org
 
 # Translation artifacts:
 per-file ....xtb=file://tools/translation/TRANSLATION_OWNERS

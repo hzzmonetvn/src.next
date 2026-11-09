@@ -4,18 +4,21 @@
 
 #include "net/http/http_server_properties.h"
 
+#include <ranges>
+#include <string_view>
+
 #include "base/check_op.h"
-#include "base/containers/adapters.h"
-#include "base/containers/contains.h"
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/strings/strcat.h"
+#include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/default_clock.h"
 #include "base/time/default_tick_clock.h"
+#include "base/time/time.h"
 #include "base/values.h"
 #include "net/base/features.h"
 #include "net/base/network_anonymization_key.h"
@@ -24,6 +27,7 @@
 #include "net/http/http_server_properties_manager.h"
 #include "net/socket/ssl_client_socket.h"
 #include "net/ssl/ssl_config.h"
+#include "url/url_constants.h"
 
 namespace net {
 
@@ -164,7 +168,10 @@ HttpServerProperties::HttpServerProperties(
       canonical_suffixes_({".ggpht.com", ".c.youtube.com", ".googlevideo.com",
                            ".googleusercontent.com", ".gvt1.com"}),
       quic_server_info_map_(kDefaultMaxQuicServerEntries),
-      max_server_configs_stored_in_properties_(kDefaultMaxQuicServerEntries) {}
+      max_server_configs_stored_in_properties_(kDefaultMaxQuicServerEntries) {
+  // Identify known QUIC alternative services, if any.
+  MaybeProcessQuicHints();
+}
 
 HttpServerProperties::~HttpServerProperties() {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
@@ -214,13 +221,17 @@ bool HttpServerProperties::SupportsRequestPriority(
   if (server.host().empty())
     return false;
 
-  if (GetSupportsSpdy(server, network_anonymization_key))
+  if ((server.scheme() == url::kHttpScheme ||
+       server.scheme() == url::kHttpsScheme) &&
+      GetSupportsSpdy(server, network_anonymization_key)) {
     return true;
+  }
   const AlternativeServiceInfoVector alternative_service_info_vector =
       GetAlternativeServiceInfos(server, network_anonymization_key);
   for (const AlternativeServiceInfo& alternative_service_info :
        alternative_service_info_vector) {
-    if (alternative_service_info.alternative_service().protocol == kProtoQUIC) {
+    if (alternative_service_info.alternative_service().protocol ==
+        NextProto::kProtoQUIC) {
       return true;
     }
   }
@@ -231,8 +242,16 @@ bool HttpServerProperties::GetSupportsSpdy(
     const url::SchemeHostPort& server,
     const NetworkAnonymizationKey& network_anonymization_key) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
-  return GetSupportsSpdyInternal(NormalizeSchemeHostPort(server),
-                                 network_anonymization_key);
+  CHECK(server.scheme() == url::kHttpScheme ||
+        server.scheme() == url::kHttpsScheme);
+  if (server.host().empty()) {
+    return false;
+  }
+
+  auto server_info = server_info_map_.Get(
+      CreateServerInfoKey(server, network_anonymization_key));
+  return server_info != server_info_map_.end() &&
+         server_info->second.supports_spdy.value_or(false);
 }
 
 void HttpServerProperties::SetSupportsSpdy(
@@ -240,14 +259,34 @@ void HttpServerProperties::SetSupportsSpdy(
     const NetworkAnonymizationKey& network_anonymization_key,
     bool supports_spdy) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
-  SetSupportsSpdyInternal(NormalizeSchemeHostPort(server),
-                          network_anonymization_key, supports_spdy);
+  CHECK(server.scheme() == url::kHttpScheme ||
+        server.scheme() == url::kHttpsScheme);
+  if (server.host().empty()) {
+    return;
+  }
+
+  auto server_info = server_info_map_.GetOrPut(
+      CreateServerInfoKey(server, network_anonymization_key));
+  // If value is already the same as `supports_spdy`, or value is unset and
+  // `supports_spdy` is false, don't queue a write.
+  bool queue_write =
+      server_info->second.supports_spdy.value_or(false) != supports_spdy;
+  server_info->second.supports_spdy = supports_spdy;
+
+  if (queue_write) {
+    MaybeQueueWriteProperties();
+  }
 }
 
 bool HttpServerProperties::RequiresHTTP11(
     const url::SchemeHostPort& server,
     const NetworkAnonymizationKey& network_anonymization_key) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+  // Avoid overhead of copying the SchemeHostPort and the NAK in the very likely
+  // case the list of servers is empty.
+  if (servers_requiring_http_11_.empty()) {
+    return false;
+  }
   return RequiresHTTP11Internal(NormalizeSchemeHostPort(server),
                                 network_anonymization_key);
 }
@@ -265,8 +304,12 @@ void HttpServerProperties::MaybeForceHTTP11(
     const NetworkAnonymizationKey& network_anonymization_key,
     SSLConfig* ssl_config) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
-  MaybeForceHTTP11Internal(NormalizeSchemeHostPort(server),
-                           network_anonymization_key, ssl_config);
+  // No need for separate internal method here, since this can use
+  // RequiresHTTP11() to do the work normalizing `server`.
+  if (RequiresHTTP11(server, network_anonymization_key)) {
+    ssl_config->alpn_protos.clear();
+    ssl_config->alpn_protos.push_back(NextProto::kProtoHTTP11);
+  }
 }
 
 AlternativeServiceInfoVector HttpServerProperties::GetAlternativeServiceInfos(
@@ -282,7 +325,7 @@ void HttpServerProperties::SetHttp2AlternativeService(
     const NetworkAnonymizationKey& network_anonymization_key,
     const AlternativeService& alternative_service,
     base::Time expiration) {
-  DCHECK_EQ(alternative_service.protocol, kProtoHTTP2);
+  DCHECK_EQ(alternative_service.protocol, NextProto::kProtoHTTP2);
 
   SetAlternativeServices(
       origin, network_anonymization_key,
@@ -297,7 +340,7 @@ void HttpServerProperties::SetQuicAlternativeService(
     const AlternativeService& alternative_service,
     base::Time expiration,
     const quic::ParsedQuicVersionVector& advertised_versions) {
-  DCHECK(alternative_service.protocol == kProtoQUIC);
+  DCHECK(alternative_service.protocol == NextProto::kProtoQUIC);
 
   SetAlternativeServices(
       origin, network_anonymization_key,
@@ -315,6 +358,118 @@ void HttpServerProperties::SetAlternativeServices(
   SetAlternativeServicesInternal(NormalizeSchemeHostPort(origin),
                                  network_anonymization_key,
                                  alternative_service_info_vector);
+}
+
+void HttpServerProperties::MaybeProcessQuicHints() {
+  if (!base::FeatureList::IsEnabled(features::kConfigureQuicHints)) {
+    return;
+  }
+
+  // QUIC hints are in the format: host,port,alternate_port
+  const std::string comma_separated = features::kQuicHintHostPortPairs.Get();
+  auto split = base::SplitStringPiece(
+      comma_separated, ",", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
+
+  // Only process QUIC hints if they are present and well-formed
+  // i.e. every 3-tuple entry is complete
+  if (!split.empty() && split.size() % 3 == 0) {
+    for (size_t i = 0; i + 2 < split.size(); i += 3) {
+      ValidateAndMaybeAddQuicHint(split[i], split[i + 1], split[i + 2]);
+    }
+  }
+
+  // Wildcard QUIC hints are in the format: .wildcard_suffix,port,alternate_port
+  // Note that a '*' is not included before the wildcard suffix to avoid
+  // needlessly removing it from the parameter.
+  const std::string comma_separated_wildcards =
+      features::kWildcardQuicHintHostPortPairs.Get();
+  auto wildcards_split =
+      base::SplitStringPiece(comma_separated_wildcards, ",",
+                             base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
+  if (!wildcards_split.empty() && wildcards_split.size() % 3 == 0) {
+    for (size_t i = 0; i + 2 < wildcards_split.size(); i += 3) {
+      ValidateAndMaybeAddQuicHint(wildcards_split[i], wildcards_split[i + 1],
+                                  wildcards_split[i + 2], /*is_suffix=*/true);
+    }
+  }
+}
+
+void HttpServerProperties::ValidateAndMaybeAddQuicHint(
+    std::string_view host,
+    std::string_view port_string,
+    std::string_view alternate_port_string,
+    bool is_suffix) {
+  url::CanonHostInfo host_info;
+  std::string canon_host(net::CanonicalizeHost(host, &host_info));
+  if (is_suffix) {
+    // Suffixes are required to start with "." to prevent unintentional matching
+    // i.e. "evil-example.com" with "example.com"
+    if (!base::StartsWith(canon_host, ".")) {
+      DLOG(ERROR) << "Invalid QUIC hint suffix: " << host;
+      return;
+    }
+  } else {
+    // IP addresses (e.g. DoH destinations) or well-formed hosts are valid
+    // QUIC hints
+    if (!host_info.IsIPAddress() &&
+        !net::IsCanonicalizedHostCompliant(canon_host)) {
+      DLOG(ERROR) << "Invalid QUIC hint host: " << host;
+      return;
+    }
+  }
+
+  int port = 0;
+  if (!base::StringToInt(port_string, &port)) {
+    DLOG(WARNING) << "Could not parse port number: " << port_string;
+    return;
+  }
+  if (port <= std::numeric_limits<uint16_t>::min() ||
+      port > std::numeric_limits<uint16_t>::max()) {
+    DLOG(ERROR) << "Invalid QUIC hint port: " << port;
+    return;
+  }
+
+  int alternate_port = 0;
+  if (!base::StringToInt(alternate_port_string, &alternate_port)) {
+    DLOG(WARNING) << "Could not parse alternate port number: "
+                  << alternate_port_string;
+    return;
+  }
+  if (alternate_port <= std::numeric_limits<uint16_t>::min() ||
+      alternate_port > std::numeric_limits<uint16_t>::max()) {
+    DLOG(ERROR) << "Invalid QUIC hint alternate port: " << alternate_port;
+    return;
+  }
+
+  SetKnownQuicAlternativeService(canon_host, port, alternate_port, is_suffix);
+}
+
+void HttpServerProperties::SetKnownQuicAlternativeService(
+    std::string_view canon_host,
+    int port,
+    int alternate_port,
+    bool is_suffix) {
+  if (!is_suffix) {
+    url::SchemeHostPort quic_server(url::kHttpsScheme, canon_host, port);
+    AlternativeService alternative_service(
+        net::NextProto::kProtoQUIC, canon_host,
+        static_cast<uint16_t>(alternate_port));
+    known_alternative_service_map_[quic_server] =
+        std::move(alternative_service);
+    return;
+  }
+
+  WildcardAlternativeServiceKey key{std::string(canon_host),
+                                    static_cast<uint16_t>(port)};
+  AlternativeService alternative_service(net::NextProto::kProtoQUIC, canon_host,
+                                         static_cast<uint16_t>(alternate_port));
+  wildcard_known_alternative_service_map_[std::move(key)] =
+      std::move(alternative_service);
+}
+
+void HttpServerProperties::SetTryQuicByDefault(bool enable) {
+  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+  try_quic_by_default_ = enable;
 }
 
 void HttpServerProperties::MarkAlternativeServiceBroken(
@@ -387,11 +542,11 @@ void HttpServerProperties::OnDefaultNetworkChanged() {
 base::Value HttpServerProperties::GetAlternativeServiceInfoAsValue() const {
   const base::Time now = clock_->Now();
   const base::TimeTicks now_ticks = tick_clock_->NowTicks();
-  base::Value::List dict_list;
+  base::ListValue dict_list;
   for (const auto& server_info : server_info_map_) {
     if (!server_info.second.alternative_services.has_value())
       continue;
-    base::Value::List alternative_service_list;
+    base::ListValue alternative_service_list;
     const ServerInfoMapKey& key = server_info.first;
     for (const AlternativeServiceInfo& alternative_service_info :
          server_info.second.alternative_services.value()) {
@@ -418,19 +573,19 @@ base::Value HttpServerProperties::GetAlternativeServiceInfoAsValue() const {
         base::Time::Exploded exploded;
         brokenness_expiration.LocalExplode(&exploded);
         std::string broken_info_string =
-            " (broken until " +
-            base::StringPrintf("%04d-%02d-%02d %0d:%0d:%0d", exploded.year,
-                               exploded.month, exploded.day_of_month,
-                               exploded.hour, exploded.minute,
-                               exploded.second) +
-            ")";
+            base::StrCat({" (broken until ",
+                          base::StringPrintf(
+                              "%04d-%02d-%02d %0d:%0d:%0d", exploded.year,
+                              exploded.month, exploded.day_of_month,
+                              exploded.hour, exploded.minute, exploded.second),
+                          ")"});
         alternative_service_string.append(broken_info_string);
       }
       alternative_service_list.Append(std::move(alternative_service_string));
     }
     if (alternative_service_list.empty())
       continue;
-    base::Value::Dict dict;
+    base::DictValue dict;
     dict.Set("server", key.server.Serialize());
     dict.Set("network_anonymization_key",
              key.network_anonymization_key.ToDebugString());
@@ -559,14 +714,16 @@ void HttpServerProperties::SetMaxServerConfigsStoredInProperties(
   max_server_configs_stored_in_properties_ =
       max_server_configs_stored_in_properties;
 
-  // LRUCache doesn't allow the capacity of the cache to be changed. Thus create
-  // a new map with the new size and add current elements and swap the new map.
+  // LRUCache doesn't allow the capacity of the cache to be changed. Thus
+  // create a new map with the new size and add current elements and swap the
+  // new map.
   quic_server_info_map_.ShrinkToSize(max_server_configs_stored_in_properties_);
   QuicServerInfoMap temp_map(max_server_configs_stored_in_properties_);
   // Update the |canonical_server_info_map_| as well, so it stays in sync with
   // |quic_server_info_map_|.
   canonical_server_info_map_ = QuicCanonicalMap();
-  for (const auto& [key, server_info] : base::Reversed(quic_server_info_map_)) {
+  for (const auto& [key, server_info] :
+       std::views::reverse(quic_server_info_map_)) {
     temp_map.Put(key, server_info);
     UpdateCanonicalServerInfoMap(key);
   }
@@ -634,43 +791,6 @@ base::TimeDelta HttpServerProperties::GetUpdatePrefsDelayForTesting() {
   return kUpdatePrefsDelay;
 }
 
-bool HttpServerProperties::GetSupportsSpdyInternal(
-    url::SchemeHostPort server,
-    const NetworkAnonymizationKey& network_anonymization_key) {
-  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
-  DCHECK_NE(server.scheme(), url::kWsScheme);
-  DCHECK_NE(server.scheme(), url::kWssScheme);
-  if (server.host().empty())
-    return false;
-
-  auto server_info = server_info_map_.Get(
-      CreateServerInfoKey(std::move(server), network_anonymization_key));
-  return server_info != server_info_map_.end() &&
-         server_info->second.supports_spdy.value_or(false);
-}
-
-void HttpServerProperties::SetSupportsSpdyInternal(
-    url::SchemeHostPort server,
-    const NetworkAnonymizationKey& network_anonymization_key,
-    bool supports_spdy) {
-  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
-  DCHECK_NE(server.scheme(), url::kWsScheme);
-  DCHECK_NE(server.scheme(), url::kWssScheme);
-  if (server.host().empty())
-    return;
-
-  auto server_info = server_info_map_.GetOrPut(
-      CreateServerInfoKey(std::move(server), network_anonymization_key));
-  // If value is already the same as |supports_spdy|, or value is unset and
-  // |supports_spdy| is false, don't queue a write.
-  bool queue_write =
-      server_info->second.supports_spdy.value_or(false) != supports_spdy;
-  server_info->second.supports_spdy = supports_spdy;
-
-  if (queue_write)
-    MaybeQueueWriteProperties();
-}
-
 bool HttpServerProperties::RequiresHTTP11Internal(
     url::SchemeHostPort server,
     const NetworkAnonymizationKey& network_anonymization_key) {
@@ -680,10 +800,9 @@ bool HttpServerProperties::RequiresHTTP11Internal(
   if (server.host().empty())
     return false;
 
-  auto spdy_info = server_info_map_.Get(
+  auto it = servers_requiring_http_11_.Get(
       CreateServerInfoKey(std::move(server), network_anonymization_key));
-  return spdy_info != server_info_map_.end() &&
-         spdy_info->second.requires_http11.value_or(false);
+  return it != servers_requiring_http_11_.end();
 }
 
 void HttpServerProperties::SetHTTP11RequiredInternal(
@@ -695,25 +814,10 @@ void HttpServerProperties::SetHTTP11RequiredInternal(
   if (server.host().empty())
     return;
 
-  server_info_map_
-      .GetOrPut(
-          CreateServerInfoKey(std::move(server), network_anonymization_key))
-      ->second.requires_http11 = true;
+  servers_requiring_http_11_.Put(
+      CreateServerInfoKey(std::move(server), network_anonymization_key));
   // No need to call MaybeQueueWriteProperties(), as this information is not
   // persisted to preferences.
-}
-
-void HttpServerProperties::MaybeForceHTTP11Internal(
-    url::SchemeHostPort server,
-    const NetworkAnonymizationKey& network_anonymization_key,
-    SSLConfig* ssl_config) {
-  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
-  DCHECK_NE(server.scheme(), url::kWsScheme);
-  DCHECK_NE(server.scheme(), url::kWssScheme);
-  if (RequiresHTTP11(std::move(server), network_anonymization_key)) {
-    ssl_config->alpn_protos.clear();
-    ssl_config->alpn_protos.push_back(kProtoHTTP11);
-  }
 }
 
 AlternativeServiceInfoVector
@@ -744,14 +848,14 @@ HttpServerProperties::GetAlternativeServiceInfosInternal(
       if (alternative_service.host.empty()) {
         alternative_service.host = origin.host();
       }
-      // If the alternative service is equivalent to the origin (same host, same
-      // port, and both TCP), skip it.
-      if (host_port_pair.Equals(alternative_service.host_port_pair()) &&
-          alternative_service.protocol == kProtoHTTP2) {
+      // If the alternative service is equivalent to the origin (same host,
+      // same port, and both TCP), skip it.
+      if (host_port_pair == alternative_service.GetHostPortPair() &&
+          alternative_service.protocol == NextProto::kProtoHTTP2) {
         ++it;
         continue;
       }
-      if (alternative_service.protocol == kProtoQUIC) {
+      if (alternative_service.protocol == NextProto::kProtoQUIC) {
         valid_alternative_service_infos.push_back(
             AlternativeServiceInfo::CreateQuicAlternativeServiceInfo(
                 alternative_service, it->expiration(),
@@ -766,55 +870,95 @@ HttpServerProperties::GetAlternativeServiceInfosInternal(
     if (service_info->empty()) {
       map_it->second.alternative_services.reset();
       server_info_map_.EraseIfEmpty(map_it);
+    } else {
+      return valid_alternative_service_infos;
+    }
+  }
+
+  // If a more specific alternative service has not been found, look for
+  // preconfigured known alternative services.
+  std::optional<AlternativeService> known_alternative_service =
+      GetKnownAltSvcHost(origin);
+  if (known_alternative_service) {
+    // Update the host to use the full hostname instead of a possible wildcard
+    // suffix.
+    known_alternative_service->host = origin.host();
+    if (known_alternative_service->protocol == NextProto::kProtoQUIC &&
+        !IsAlternativeServiceBroken(*known_alternative_service,
+                                    network_anonymization_key)) {
+      valid_alternative_service_infos.push_back(
+          AlternativeServiceInfo::CreateQuicAlternativeServiceInfo(
+              *known_alternative_service, base::Time::Max(),
+              DefaultSupportedQuicVersions()));
     }
     return valid_alternative_service_infos;
   }
 
   auto canonical = GetCanonicalAltSvcHost(origin, network_anonymization_key);
-  if (canonical == canonical_alt_svc_map_.end()) {
-    return AlternativeServiceInfoVector();
-  }
-  map_it = server_info_map_.Get(
-      CreateServerInfoKey(canonical->second, network_anonymization_key));
-  if (map_it == server_info_map_.end() ||
-      !map_it->second.alternative_services.has_value()) {
-    return AlternativeServiceInfoVector();
-  }
-  AlternativeServiceInfoVector* service_info =
-      &map_it->second.alternative_services.value();
-  for (auto it = service_info->begin(); it != service_info->end();) {
-    if (it->expiration() < now) {
-      it = service_info->erase(it);
-      continue;
-    }
-    AlternativeService alternative_service(it->alternative_service());
-    if (alternative_service.host.empty()) {
-      alternative_service.host = canonical->second.host();
-      if (IsAlternativeServiceBroken(alternative_service,
-                                     network_anonymization_key)) {
+  if (canonical != canonical_alt_svc_map_.end()) {
+    map_it = server_info_map_.Get(
+        CreateServerInfoKey(canonical->second, network_anonymization_key));
+    if (map_it != server_info_map_.end() &&
+        map_it->second.alternative_services.has_value()) {
+      AlternativeServiceInfoVector* service_info =
+          &map_it->second.alternative_services.value();
+      for (auto it = service_info->begin(); it != service_info->end();) {
+        if (it->expiration() < now) {
+          it = service_info->erase(it);
+          continue;
+        }
+        AlternativeService alternative_service(it->alternative_service());
+        if (alternative_service.host.empty()) {
+          alternative_service.host = canonical->second.host();
+          if (IsAlternativeServiceBroken(alternative_service,
+                                         network_anonymization_key)) {
+            ++it;
+            continue;
+          }
+          alternative_service.host = origin.host();
+        } else if (IsAlternativeServiceBroken(alternative_service,
+                                              network_anonymization_key)) {
+          ++it;
+          continue;
+        }
+        if (alternative_service.protocol == NextProto::kProtoQUIC) {
+          valid_alternative_service_infos.push_back(
+              AlternativeServiceInfo::CreateQuicAlternativeServiceInfo(
+                  alternative_service, it->expiration(),
+                  it->advertised_versions()));
+        } else {
+          valid_alternative_service_infos.push_back(
+              AlternativeServiceInfo::CreateHttp2AlternativeServiceInfo(
+                  alternative_service, it->expiration()));
+        }
         ++it;
-        continue;
       }
-      alternative_service.host = origin.host();
-    } else if (IsAlternativeServiceBroken(alternative_service,
-                                          network_anonymization_key)) {
-      ++it;
-      continue;
+      if (service_info->empty()) {
+        map_it->second.alternative_services.reset();
+        server_info_map_.EraseIfEmpty(map_it);
+      } else {
+        return valid_alternative_service_infos;
+      }
     }
-    if (alternative_service.protocol == kProtoQUIC) {
+  }
+
+  // If no alternative service was found from `server_info_map_`, known hints,
+  // wildcard suffix hints, or canonical maps, and `try_quic_by_default_` is
+  // enabled, attempt QUIC on the destination host and port for HTTPS origins
+  // (unless already marked broken).
+  if (try_quic_by_default_ && origin.scheme() == url::kHttpsScheme &&
+      origin.port() != 0 && !origin.host().empty()) {
+    AlternativeService default_alternative_service(
+        NextProto::kProtoQUIC, origin.host(), origin.port());
+    if (!IsAlternativeServiceBroken(default_alternative_service,
+                                    network_anonymization_key)) {
       valid_alternative_service_infos.push_back(
           AlternativeServiceInfo::CreateQuicAlternativeServiceInfo(
-              alternative_service, it->expiration(),
-              it->advertised_versions()));
-    } else {
-      valid_alternative_service_infos.push_back(
-          AlternativeServiceInfo::CreateHttp2AlternativeServiceInfo(
-              alternative_service, it->expiration()));
+              default_alternative_service, base::Time::Max(),
+              DefaultSupportedQuicVersions()));
     }
-    ++it;
   }
-  if (service_info->empty())
-    server_info_map_.EraseIfEmpty(map_it);
+
   return valid_alternative_service_infos;
 }
 
@@ -854,8 +998,8 @@ void HttpServerProperties::SetAlternativeServicesInternal(
       need_update_pref = false;
       auto new_it = alternative_service_info_vector.begin();
       for (const auto& old : *it->second.alternative_services) {
-        // Persist to disk immediately if new entry has different scheme, host,
-        // or port.
+        // Persist to disk immediately if new entry has different scheme,
+        // host, or port.
         if (old.alternative_service() != new_it->alternative_service()) {
           need_update_pref = true;
           break;
@@ -869,8 +1013,8 @@ void HttpServerProperties::SetAlternativeServicesInternal(
           need_update_pref = true;
           break;
         }
-        // Also persist to disk if new entry has a different list of advertised
-        // versions.
+        // Also persist to disk if new entry has a different list of
+        // advertised versions.
         if (old.advertised_versions() != new_it->advertised_versions()) {
           need_update_pref = true;
           break;
@@ -1021,6 +1165,36 @@ HttpServerProperties::GetIteratorWithAlternativeServiceInfo(
   return server_info_map_.end();
 }
 
+std::optional<AlternativeService> HttpServerProperties::GetKnownAltSvcHost(
+    const url::SchemeHostPort& server) const {
+  const char* kKnownAltSvcScheme = url::kHttpsScheme;
+  if (server.scheme() != kKnownAltSvcScheme) {
+    return std::nullopt;
+  }
+
+  auto it = known_alternative_service_map_.find(server);
+  if (it != known_alternative_service_map_.end()) {
+    return it->second;
+  }
+  if (wildcard_known_alternative_service_map_.empty()) {
+    return std::nullopt;
+  }
+
+  std::string_view host = server.host();
+  size_t dot_pos = host.find('.');
+  while (dot_pos != std::string_view::npos) {
+    std::string_view suffix = host.substr(dot_pos);
+    auto suffix_it = wildcard_known_alternative_service_map_.find(
+        WildcardAlternativeServiceKeyRef{suffix, server.port()});
+    if (suffix_it != wildcard_known_alternative_service_map_.end()) {
+      return suffix_it->second;
+    }
+    dot_pos = host.find('.', dot_pos + 1);
+  }
+
+  return std::nullopt;
+}
+
 HttpServerProperties::CanonicalMap::const_iterator
 HttpServerProperties::GetCanonicalAltSvcHost(
     const url::SchemeHostPort& server,
@@ -1100,8 +1274,8 @@ void HttpServerProperties::OnPrefsLoaded(
 
   DCHECK(!is_initialized_);
 
-  // Either all of these are nullptr, or none of them are (except the broken alt
-  // service fields).
+  // Either all of these are nullptr, or none of them are (except the broken
+  // alt service fields).
   if (server_info_map) {
     OnServerInfoLoaded(std::move(server_info_map));
     OnLastLocalAddressWhenQuicWorkedLoaded(last_local_address_when_quic_worked);
@@ -1117,8 +1291,8 @@ void HttpServerProperties::OnPrefsLoaded(
   is_initialized_ = true;
 
   if (queue_write_on_load_) {
-    // Leaving this as true doesn't actually have any effect, but seems best to
-    // be safe.
+    // Leaving this as true doesn't actually have any effect, but seems best
+    // to be safe.
     queue_write_on_load_ = false;
     MaybeQueueWriteProperties();
   }
@@ -1143,7 +1317,7 @@ void HttpServerProperties::OnServerInfoLoaded(
   server_info_map_.Swap(*server_info_map);
 
   // Add the entries from the memory cache.
-  for (auto& [key, server_info] : base::Reversed(*server_info_map)) {
+  for (auto& [key, server_info] : std::views::reverse(*server_info_map)) {
     // If there's no corresponding old entry, add the new entry directly.
     auto old_entry = server_info_map_.Get(key);
     if (old_entry == server_info_map_.end()) {
@@ -1159,11 +1333,6 @@ void HttpServerProperties::OnServerInfoLoaded(
       old_entry->second.alternative_services = server_info.alternative_services;
     if (!old_entry->second.server_network_stats.has_value())
       old_entry->second.server_network_stats = server_info.server_network_stats;
-
-    // |requires_http11| isn't saved to prefs, so the loaded entry should not
-    // have it set. Unconditionally copy it from the new entry.
-    DCHECK(!old_entry->second.requires_http11.has_value());
-    old_entry->second.requires_http11 = server_info.requires_http11;
   }
 
   // Attempt to find canonical servers. Canonical suffix only apply to HTTPS.
@@ -1183,7 +1352,7 @@ void HttpServerProperties::OnServerInfoLoaded(
                             kCanonicalPort),
         it.first.network_anonymization_key);
     // If we already have a valid canonical server, we're done.
-    if (base::Contains(canonical_alt_svc_map_, key)) {
+    if (canonical_alt_svc_map_.contains(key)) {
       auto key_it = server_info_map_.Peek(key);
       if (key_it != server_info_map_.end() &&
           key_it->second.alternative_services.has_value()) {
@@ -1207,7 +1376,8 @@ void HttpServerProperties::OnQuicServerInfoMapLoaded(
   quic_server_info_map_.Swap(*quic_server_info_map);
 
   // Add the entries from the memory cache.
-  for (const auto& [key, server_info] : base::Reversed(*quic_server_info_map)) {
+  for (const auto& [key, server_info] :
+       std::views::reverse(*quic_server_info_map)) {
     if (quic_server_info_map_.Get(key) == quic_server_info_map_.end()) {
       quic_server_info_map_.Put(key, server_info);
     }
@@ -1216,7 +1386,8 @@ void HttpServerProperties::OnQuicServerInfoMapLoaded(
   // Repopulate |canonical_server_info_map_| to stay in sync with
   // |quic_server_info_map_|.
   canonical_server_info_map_.clear();
-  for (const auto& [key, server_info] : base::Reversed(quic_server_info_map_)) {
+  for (const auto& [key, server_info] :
+       std::views::reverse(quic_server_info_map_)) {
     UpdateCanonicalServerInfoMap(key);
   }
 }

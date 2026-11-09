@@ -17,7 +17,7 @@
 
 namespace base::android {
 
-BASE_DECLARE_FEATURE(kYieldWithInputHint);
+BASE_EXPORT BASE_DECLARE_FEATURE(kYieldWithInputHint);
 
 // These values are persisted to logs. Entries should not be renumbered and
 // numeric values should never be reused.
@@ -57,7 +57,7 @@ class BASE_EXPORT InputHintChecker {
   // Obtains a weak reference to |root_view| so that the following calls to
   // HasInput() take the input hint for this View. Requirements for the View
   // object are described in InputHintChecker.java.
-  void SetView(JNIEnv* env, const jni_zero::JavaParamRef<jobject>& root_view);
+  void SetView(JNIEnv* env, const jni_zero::JavaRef<jobject>& root_view);
 
   // Fetches and returns the input hint from the Android Framework.
   //
@@ -83,8 +83,11 @@ class BASE_EXPORT InputHintChecker {
   void set_is_after_input_yield(bool after) { is_after_input_yield_ = after; }
   bool is_after_input_yield() { return is_after_input_yield_; }
 
+  // Used to test UMA metric recording.
+  void disable_metric_subsampling() { metric_subsampling_disabled_ = true; }
+
   // Records the UMA metric based on the InputHintResult.
-  static void RecordInputHintResult(InputHintResult result);
+  void RecordInputHintResult(InputHintResult result);
 
   bool IsInitializedForTesting();
   bool FailedToInitializeForTesting();
@@ -105,6 +108,7 @@ class BASE_EXPORT InputHintChecker {
   bool HasInputImpl(JNIEnv* env, jobject o);
 
   bool is_after_input_yield_ = false;
+  bool metric_subsampling_disabled_ = false;
 
   // Last time the input hint was requested. Used for throttling.
   base::TimeTicks last_checked_;
@@ -122,15 +126,8 @@ class BASE_EXPORT InputHintChecker {
   // initialization.
   ScopedJavaGlobalRef<jobject> view_class_;
 
-  // Represents a reference to object of type j.l.reflect.Method for
-  // View#probablyHasInput().
-  ScopedJavaGlobalRef<jobject> reflect_method_for_has_input_;
-
-  // The ID corresponding to j.l.reflect.Method#invoke(Object, Object...).
-  jmethodID invoke_id_;
-
-  // The ID corresponding to j.l.Boolean#booleanValue().
-  jmethodID boolean_value_id_;
+  // The ID corresponding to android.view.View#probablyHasInput().
+  jmethodID has_input_method_id_ = nullptr;
   THREAD_CHECKER(thread_checker_);
 };
 

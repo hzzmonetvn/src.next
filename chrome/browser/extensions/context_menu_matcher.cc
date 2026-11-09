@@ -16,9 +16,12 @@
 #include "content/public/browser/context_menu_params.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/browser/extension_util.h"
+#include "extensions/buildflags/buildflags.h"
 #include "ui/base/models/image_model.h"
 #include "ui/gfx/favicon_size.h"
 #include "ui/gfx/image/image.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -26,6 +29,10 @@ namespace {
 
 // The range of command IDs reserved for extension's custom menus.
 // TODO(oshima): These values will be injected by embedders.
+constexpr int kMaxExtensionCustomCommands = 1000;
+constexpr int IDC_EXTENSIONS_CONTEXT_CUSTOM_LAST =
+    IDC_EXTENSIONS_CONTEXT_CUSTOM_FIRST + kMaxExtensionCustomCommands;
+
 int extensions_context_custom_first = IDC_EXTENSIONS_CONTEXT_CUSTOM_FIRST;
 int extensions_context_custom_last = IDC_EXTENSIONS_CONTEXT_CUSTOM_LAST;
 
@@ -64,7 +71,7 @@ void ContextMenuMatcher::AppendExtensionItems(
     int* index,
     bool is_action_menu,
     const std::u16string& group_title) {
-  DCHECK_GE(*index, 0);
+  CHECK_GE(*index, 0, base::NotFatalUntil::M161);
   int max_index =
       extensions_context_custom_last - extensions_context_custom_first;
   if (*index >= max_index)
@@ -280,7 +287,8 @@ bool ContextMenuMatcher::GetRelevantExtensionTopLevelItems(
     }
     // |extension_key.extension_id| should be empty only if
     // |extension_key.webview_instance_id| is valid.
-    DCHECK(extension_key.webview_instance_id != guest_view::kInstanceIDNone);
+    CHECK(extension_key.webview_instance_id != guest_view::kInstanceIDNone,
+          base::NotFatalUntil::M161);
   }
 
   // Find matching items.
@@ -408,9 +416,11 @@ void ContextMenuMatcher::SetExtensionIcon(
   MenuManager* menu_manager = MenuManager::Get(browser_context_);
 
   size_t count = menu_model_->GetItemCount();
-  DCHECK_GT(count, 0u);
+  CHECK_GT(count, 0u, base::NotFatalUntil::M161);
 
   gfx::Image icon = menu_manager->GetIconForExtensionKey(extension_key);
+  // TODO(crbug.com/571465042): CHECK-exclusion: Convert to a CHECK once we are
+  // confident it won't be triggered.
   DCHECK_EQ(gfx::kFaviconSize, icon.Width());
   DCHECK_EQ(gfx::kFaviconSize, icon.Height());
   menu_model_->SetIcon(count - 1, ui::ImageModel::FromImage(icon));

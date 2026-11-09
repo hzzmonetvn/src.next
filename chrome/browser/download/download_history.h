@@ -14,8 +14,11 @@
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
+#include "base/time/time.h"
+#include "build/build_config.h"
 #include "components/download/content/public/all_download_item_notifier.h"
 #include "components/download/public/common/download_item.h"
+#include "components/download/public/common/download_utils.h"
 #include "components/history/core/browser/history_service.h"
 #include "content/public/browser/download_manager.h"
 
@@ -104,8 +107,15 @@ class DownloadHistory : public download::AllDownloadItemNotifier::Observer {
   // table.
   void QueryCallback(std::vector<history::DownloadRow> rows);
 
+#if BUILDFLAG(IS_ANDROID)
+  void RetrieveDisplayNamesAndLoadHistoryDownloads(
+      std::vector<history::DownloadRow> rows);
+  void LoadHistoryDownloads(const std::vector<history::DownloadRow>& rows,
+                            download::DisplayNames display_names);
+#else
   // Called to create all history downloads.
   void LoadHistoryDownloads(const std::vector<history::DownloadRow>& rows);
+#endif
 
   // May add |item| to |history_|.
   void MaybeAddToHistory(download::DownloadItem* item);
@@ -158,6 +168,8 @@ class DownloadHistory : public download::AllDownloadItemNotifier::Observer {
   IdSet removed_while_adding_;
 
   bool initial_history_query_complete_;
+
+  const base::TimeTicks load_start_time_{base::TimeTicks::Now()};
 
   base::ObserverList<Observer>::Unchecked observers_;
 
