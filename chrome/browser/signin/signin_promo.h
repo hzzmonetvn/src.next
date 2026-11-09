@@ -7,16 +7,21 @@
 
 #include <string>
 
+#include "base/functional/callback_forward.h"
+#include "base/memory/scoped_refptr.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
+#include "components/signin/public/base/signin_buildflags.h"
 #include "components/signin/public/base/signin_metrics.h"
-
-class GURL;
+#include "url/gurl.h"
 
 namespace content {
 class BrowserContext;
 class StoragePartition;
 }  // namespace content
+
+namespace device {
+class BluetoothAdapter;
+}
 
 namespace user_prefs {
 class PrefRegistrySyncable;
@@ -25,13 +30,15 @@ class PrefRegistrySyncable;
 // Utility functions for sign in promos.
 namespace signin {
 
+class AccountsInCookieJarInfo;
+
 extern const char kSignInPromoQueryKeyAccessPoint[];
 // TODO(crbug.com/40764426): Auto close is unused. Remove it.
 extern const char kSignInPromoQueryKeyAutoClose[];
 extern const char kSignInPromoQueryKeyForceKeepData[];
 extern const char kSignInPromoQueryKeyReason[];
 
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
 // These functions are only used to unlock the profile from the desktop user
 // manager and the windows credential provider.
 
@@ -49,7 +56,7 @@ GURL GetEmbeddedPromoURL(signin_metrics::AccessPoint access_point,
 GURL GetEmbeddedReauthURLWithEmail(signin_metrics::AccessPoint access_point,
                                    signin_metrics::Reason reason,
                                    const std::string& email);
-#endif  // !BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // !BUILDFLAG(IS_CHROMEOS)
 
 // Controls the information displayed around the Gaia Sign In page via the
 // "flow" url parameter.
@@ -66,6 +73,19 @@ enum class Flow {
   EMBEDDED_PROMO
 };
 
+// Maps to a subset of `signin_metrics::AccessPoint`. Is used for both signin
+// and sync promos.
+enum class SignInPromoType {
+  kPassword,
+  kAddress,
+  kBookmark,
+  kExtension,
+  kSearchAIMode,
+  kSendTabToSelf,
+  kComposeboxDriveContextMenuOption,
+  // Add other types here if other access points will show a signin promo.
+};
+
 // Wraps arguments for `GetChromeSyncURLForDice()`. They are all optional.
 struct ChromeSyncUrlArgs {
   // If not empty, will be passed as hint to the page so that it will be
@@ -79,30 +99,87 @@ struct ChromeSyncUrlArgs {
   Flow flow = Flow::NONE;
 };
 
+#if BUILDFLAG(ENABLE_DICE_SUPPORT)
 // Returns the URL to be used to signin and turn on Sync when DICE is enabled.
 // See `ChromeSyncUrlArgs` docs for details on the arguments.
 GURL GetChromeSyncURLForDice(ChromeSyncUrlArgs args);
 
-// Returns the URL to be used to reauth.
-// As part of `args` only `email` and `continue_url` are used:
-// `email` is used to be able to preview the URL with the appropriate email:
-// - if the value is empty: the regular sign in page is opened with no prefill.
-// - if the value is set and correspond to an existing account used within the
-// profile previously: the "Verify it's you" page is opened with the preselected
-// account on the next page requesting the authentication. Note: the email can
-// still be modified by the user and does not guarantee that the reauth attempt
-// will be done on this email/account.
-// - if the value is set but the email does not correspond to an account
-// previously used within the profile: the regular sign in gaia page is
-// displayed with the prefilled email.
-// `continue_url` is used to redirect to the given url in case of successful
-// reauth.
-GURL GetChromeReauthURL(ChromeSyncUrlArgs args);
+// Called with whether hybrid transport is supported, and with the Bluetooth
+// adapter used for the check, which is null if Bluetooth LE is not supported.
+using HybridTransportSupportedCallback =
+    base::OnceCallback<void(bool, scoped_refptr<device::BluetoothAdapter>)>;
+
+// Checks asynchronously whether bluetooth is supported and enabled on the
+// device. Callers may hold the adapter passed to `callback` to keep it alive,
+// so that later `device::BluetoothAdapterFactory::GetAdapter()` calls reuse it
+// instead of creating a new one.
+void IsHybridTransportSupportedForQrCodeSignin(
+    HybridTransportSupportedCallback callback);
+#endif  // BUILDFLAG(ENABLE_DICE_SUPPORT)
+
+// Wraps arguments for `GetChromeReauthURL()`. They are all optional.
+struct ChromeReauthUrlArgs {
+  // Used to be able to preview the URL with the appropriate email:
+  // - if the value is empty: the regular sign in page is opened with no
+  // prefill.
+  // - if the value is set and correspond to an existing account used within the
+  // profile previously: the "Verify it's you" page is opened with the
+  // preselected account on the next page requesting the authentication. Note:
+  // the email can still be modified by the user and does not guarantee that the
+  // reauth attempt will be done on this email/account.
+  // - if the value is set but the email does not correspond to an account
+  // previously used within the profile: the regular sign in gaia page is
+  // displayed with the prefilled email.
+  const std::string email;
+  // Used to redirect to the given url in case of successful reauth.
+  const GURL continue_url;
+  // If true, appends the `ptc=1` ("Proceed To Challenge") parameter so that
+  // Gaia skips the identifier page and goes straight to the challenge (e.g.
+  // password) page for `email`.
+  bool proceed_to_challenge = false;
+};
+
+// Returns the URL to be used to reauth. See `ChromeReauthUrlArgs` docs for
+// details on the arguments.
+GURL GetChromeReauthURL(ChromeReauthUrlArgs args);
+
+// Outcome of checking whether a reauth for an account can use
+// `GetChromeReauthURL()` with `proceed_to_challenge` based on the cookie jar.
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+// LINT.IfChange(ReauthProceedToChallengeResult)
+enum class ReauthProceedToChallengeResult {
+  // `/AccountChooser` with `ptc=1` is used and the account is present in the
+  // cookie jar (signed out or invalid), so Gaia skips the identifier page.
+  kProceedToChallenge = 0,
+  // `/AccountChooser` with `ptc=1` is used, but the account is not in the
+  // cookie jar (e.g. cookies were cleared), so Gaia still shows the prefilled
+  // identifier page.
+  kAccountNotInCookies = 1,
+  // Falls back to `/AddSession` because cookie jar info is stale or the account
+  // still has a valid Gaia session.
+  kAddSessionFallback = 2,
+  kMaxValue = kAddSessionFallback,
+};
+// LINT.ThenChange(//tools/metrics/histograms/metadata/signin/enums.xml:ReauthProceedToChallengeResult)
+
+// Returns whether a reauth for `email` can use `GetChromeReauthURL()` with
+// `proceed_to_challenge`, based on `accounts_in_cookie_jar`.
+// Returns false (i.e. callers should keep using `GetAddAccountURLForDice()`)
+// if `email` is empty, if the cookie jar info is stale, or if `email` still
+// has a valid signed-in Gaia session.
+// When `email` is non-empty, records `Signin.Reauth.ProceedToChallengeResult`.
+bool CanReauthProceedToChallenge(
+    const std::string& email,
+    const AccountsInCookieJarInfo& accounts_in_cookie_jar);
 
 // Returns the URL to be used to add (secondary) account when DICE is enabled.
 // If email is not empty, then it will pass email as hint to the page so that it
 // will be autofilled by Gaia.
 // If |continue_url| is empty, this may redirect to myaccount.
+// Deprecated for secondary DICE account addition (crbug.com/420635510):
+// For this case, use `GetChromeSyncURLForDice` instead.
+// The method remains valid for cases relating to users' re-authentication.
 GURL GetAddAccountURLForDice(const std::string& email,
                              const GURL& continue_url);
 
@@ -111,7 +188,8 @@ content::StoragePartition* GetSigninPartition(
     content::BrowserContext* browser_context);
 
 // Gets the access point from the query portion of the sign in promo URL.
-signin_metrics::AccessPoint GetAccessPointForEmbeddedPromoURL(const GURL& url);
+std::optional<signin_metrics::AccessPoint> GetAccessPointForEmbeddedPromoURL(
+    const GURL& url);
 
 // Gets the sign in reason from the query portion of the sign in promo URL.
 signin_metrics::Reason GetSigninReasonForEmbeddedPromoURL(const GURL& url);

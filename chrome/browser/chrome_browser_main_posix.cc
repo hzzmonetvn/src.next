@@ -13,11 +13,12 @@
 
 #include <string>
 
+#include "base/allocator/partition_alloc_support.h"
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
 #include "base/functional/bind.h"
 #include "base/notreached.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/browser/devtools/chrome_devtools_manager_delegate.h"
 #include "chrome/browser/lifetime/application_lifetime.h"
 #include "chrome/browser/lifetime/application_lifetime_desktop.h"
@@ -69,6 +70,15 @@ class ExitHandler {
 void ExitHandler::ExitWhenPossibleOnUIThread(int signal) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
+#if BUILDFLAG(IS_CHROMEOS)
+  // On ChromeOS, many shut down hangs have been seen in certain PartitionAlloc
+  // features. Make Free a Noop to prevent that. This was originally done for
+  // normal shutdowns and Googlers can read the report at
+  // go/cros-no-op-free-2024, however this was added after it was discovered
+  // signal handlers don't hit that path. See crbug.com/561483162.
+  base::allocator::MakeFreeNoOp();
+#endif
+
   // DevTools delegate's browser keeplive may prevent browser from closing so
   // remove it before proceeding because we have an explicit shutdown request.
   ChromeDevToolsManagerDelegate::AllowBrowserToClose();
@@ -77,9 +87,7 @@ void ExitHandler::ExitWhenPossibleOnUIThread(int signal) {
     // ExitHandler takes care of deleting itself.
     new ExitHandler();
   } else {
-// TODO(crbug.com/40118868): Revisit the macro expression once build flag switch
-// of lacros-chrome is complete.
-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS_LACROS)
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_MAC)
     switch (signal) {
       case SIGINT:
       case SIGHUP:
@@ -92,9 +100,11 @@ void ExitHandler::ExitWhenPossibleOnUIThread(int signal) {
       case SIGTERM:
         // SIGTERM is usually sent instead of SIGKILL to gracefully shutdown
         // processes.  But most systems use it as a shutdown warning, so
-        // conservatively assume that the session is ending.  If the process
-        // still doesn't quit within a bounded time, most systems will finally
-        // send SIGKILL, which we're unable to install a signal handler for.
+        // conservatively assume that the session is ending. On macOS, launchd
+        // delivers SIGTERM at logout, shutdown, reboot, or update. If the
+        // process still doesn't quit within a bounded time, most systems will
+        // finally send SIGKILL, which we're unable to install a signal handler
+        // for.
         // TODO(thomasanderson): Try to distinguish if the session is really
         // ending or not.  Maybe there's a systemd or DBus API to query.
         chrome::SessionEnding();
@@ -114,8 +124,7 @@ ExitHandler::ExitHandler() {
           &ExitHandler::OnSessionRestoreDone, base::Unretained(this)));
 }
 
-ExitHandler::~ExitHandler() {
-}
+ExitHandler::~ExitHandler() = default;
 
 void ExitHandler::OnSessionRestoreDone(Profile* profile, int /* num_tabs */) {
   if (!SessionRestore::IsRestoringSynchronously()) {
@@ -130,7 +139,7 @@ void ExitHandler::OnSessionRestoreDone(Profile* profile, int /* num_tabs */) {
 
 // static
 void ExitHandler::Exit() {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   // On ChromeOS, exiting on signal should be always clean.
   chrome::ExitIgnoreUnloadHandlers();
 #else
@@ -154,8 +163,7 @@ int ChromeBrowserMainPartsPosix::PreEarlyInitialization() {
 
   // We need to accept SIGCHLD, even though our handler is a no-op because
   // otherwise we cannot wait on children. (According to POSIX 2001.)
-  struct sigaction action;
-  memset(&action, 0, sizeof(action));
+  struct sigaction action = {};
   action.sa_handler = SIGCHLDHandler;
   CHECK_EQ(0, sigaction(SIGCHLD, &action, nullptr));
 
@@ -172,7 +180,7 @@ void ChromeBrowserMainPartsPosix::PostCreateMainMessageLoop() {
 }
 
 void ChromeBrowserMainPartsPosix::ShowMissingLocaleMessageBox() {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   NOTREACHED();  // Should not ever happen on ChromeOS.
 #elif BUILDFLAG(IS_MAC)
   // Not called on Mac because we load the locale files differently.

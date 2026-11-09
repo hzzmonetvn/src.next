@@ -2,20 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/351564777): Remove this and convert code to safer constructs.
-#pragma allow_unsafe_buffers
-#endif
-
-#ifdef UNSAFE_BUFFERS_BUILD
-// TODO(crbug.com/351564777): Remove this and convert code to safer constructs.
-#pragma allow_unsafe_buffers
-#endif
-
 #include "extensions/browser/extension_pref_value_map.h"
 
 #include <stdint.h>
 
+#include <array>
 #include <memory>
 
 #include "base/memory/ref_counted.h"
@@ -51,9 +42,12 @@ class ExtensionPrefValueMapTestBase : public BASECLASS {
   using ChromeSettingScope = extensions::api::types::ChromeSettingScope;
 
   // Returns an empty string if the key is not set.
-  std::string GetValue(const char * key, bool incognito) const {
-    const base::Value* value =
-        epvm_.GetEffectivePrefValue(key, incognito, nullptr);
+  std::string GetValue(
+      const char* key,
+      bool incognito,
+      std::optional<std::string> ignore_extension_id = std::nullopt) const {
+    const base::Value* value = epvm_.GetEffectivePrefValue(
+        key, incognito, nullptr, ignore_extension_id);
     return value && value->is_string() ? value->GetString() : std::string();
   }
 
@@ -254,6 +248,105 @@ TEST_F(ExtensionPrefValueMapTest, UninstallExtensionFromMiddle) {
   EXPECT_EQ(std::string(), GetValue(kPref4, false));
 }
 
+// Tests ignoring an extension that was winning for a preference.
+TEST_F(ExtensionPrefValueMapTest, IgnoreExtension) {
+  RegisterExtension(kExt1, CreateTime(10));
+  RegisterExtension(kExt2, CreateTime(20));
+  RegisterExtension(kExt3, CreateTime(30));
+
+  epvm_.SetExtensionPref(kExt1, kPref1, ChromeSettingScope::kRegular,
+                         CreateVal("pref1ext1"));
+  epvm_.SetExtensionPref(kExt2, kPref1, ChromeSettingScope::kRegular,
+                         CreateVal("pref1ext2"));
+  epvm_.SetExtensionPref(kExt3, kPref1, ChromeSettingScope::kRegular,
+                         CreateVal("pref1ext3"));
+
+  epvm_.SetExtensionPref(kExt2, kPref2, ChromeSettingScope::kRegular,
+                         CreateVal("pref2ext2"));
+
+  EXPECT_EQ("pref1ext3", GetValue(kPref1, false));
+  EXPECT_EQ("pref1ext3", GetValue(kPref1, false, std::string()));
+  EXPECT_EQ("pref1ext2", GetValue(kPref1, false, kExt3));
+  EXPECT_EQ("pref1ext3", GetValue(kPref1, false, kExt1));
+
+  EXPECT_EQ("pref2ext2", GetValue(kPref2, false));
+  EXPECT_EQ(std::string(), GetValue(kPref2, false, kExt2));
+}
+
+// Tests listing the extensions setting a preference, in precedence order.
+TEST_F(ExtensionPrefValueMapTest, GetExtensionsSettingPrefByPrecedence) {
+  using testing::ElementsAre;
+  using testing::IsEmpty;
+
+  RegisterExtension(kExt1, CreateTime(10));
+  RegisterExtension(kExt2, CreateTime(30));
+  RegisterExtension(kExt3, CreateTime(20));
+
+  EXPECT_THAT(epvm_.GetExtensionsSettingPrefByPrecedence(kPref1), IsEmpty());
+
+  epvm_.SetExtensionPref(kExt1, kPref1, ChromeSettingScope::kRegular,
+                         CreateVal("pref1ext1"));
+  epvm_.SetExtensionPref(kExt2, kPref1, ChromeSettingScope::kRegular,
+                         CreateVal("pref1ext2"));
+  // A regular-only value counts for a regular profile.
+  epvm_.SetExtensionPref(kExt3, kPref1, ChromeSettingScope::kRegularOnly,
+                         CreateVal("pref1ext3"));
+  // Values for other preferences are not included.
+  epvm_.SetExtensionPref(kExt3, kPref2, ChromeSettingScope::kRegular,
+                         CreateVal("pref2ext3"));
+
+  EXPECT_THAT(epvm_.GetExtensionsSettingPrefByPrecedence(kPref1),
+              ElementsAre(kExt2, kExt3, kExt1));
+  EXPECT_EQ(kExt2, epvm_.GetExtensionControllingPref(kPref1));
+  EXPECT_THAT(epvm_.GetExtensionsSettingPrefByPrecedence(kPref2),
+              ElementsAre(kExt3));
+
+  // A disabled extension drops out and comes back when re-enabled.
+  epvm_.SetExtensionState(kExt2, false);
+
+  EXPECT_THAT(epvm_.GetExtensionsSettingPrefByPrecedence(kPref1),
+              ElementsAre(kExt3, kExt1));
+  EXPECT_EQ(kExt3, epvm_.GetExtensionControllingPref(kPref1));
+
+  epvm_.SetExtensionState(kExt2, true);
+
+  EXPECT_THAT(epvm_.GetExtensionsSettingPrefByPrecedence(kPref1),
+              ElementsAre(kExt2, kExt3, kExt1));
+
+  // Incognito values do not count for a regular profile.
+  epvm_.SetExtensionIncognitoState(kExt1, true);
+  epvm_.SetExtensionPref(kExt1, kPref3,
+                         ChromeSettingScope::kIncognitoPersistent,
+                         CreateVal("pref3ext1"));
+
+  EXPECT_THAT(epvm_.GetExtensionsSettingPrefByPrecedence(kPref3), IsEmpty());
+}
+
+// Tests that ties resolve the way GetExtensionControllingPref() does: with
+// install times equal, precedence goes to the greater extension ID.
+TEST_F(ExtensionPrefValueMapTest,
+       GetExtensionsSettingPrefByPrecedenceWithEqualInstallTimes) {
+  RegisterExtension(kExt1, CreateTime(10));
+  RegisterExtension(kExt2, CreateTime(10));
+  RegisterExtension(kExt3, CreateTime(10));
+
+  epvm_.SetExtensionPref(kExt1, kPref1, ChromeSettingScope::kRegular,
+                         CreateVal("pref1ext1"));
+  epvm_.SetExtensionPref(kExt2, kPref1, ChromeSettingScope::kRegular,
+                         CreateVal("pref1ext2"));
+  epvm_.SetExtensionPref(kExt3, kPref1, ChromeSettingScope::kRegular,
+                         CreateVal("pref1ext3"));
+
+  const extensions::ExtensionIdList extension_ids =
+      epvm_.GetExtensionsSettingPrefByPrecedence(kPref1);
+
+  EXPECT_THAT(extension_ids, testing::ElementsAre(kExt3, kExt2, kExt1));
+  // First entry controls the pref; second takes over if it's ignored.
+  EXPECT_EQ(kExt3, epvm_.GetExtensionControllingPref(kPref1));
+  EXPECT_EQ("pref1ext2", GetValue(kPref1, /*incognito=*/false,
+                                  /*ignore_extension_id=*/kExt3));
+}
+
 // Tests triggering of notifications to registered observers.
 TEST_F(ExtensionPrefValueMapTest, NotifyWhenNeeded) {
   using testing::Mock;
@@ -383,16 +476,9 @@ class ExtensionPrefValueMapTestIncognitoTests
 
 TEST_P(ExtensionPrefValueMapTestIncognitoTests, OverrideIncognito) {
   OverrideIncognitoTestCase test = GetParam();
-  const char* strings[] = {
+  static constexpr std::array strings = {
       "",  // undefined
-      "val1",
-      "val2",
-      "val3",
-      "val4",
-      "val5",
-      "val6",
-      "val7",
-      "val8",
+      "val1", "val2", "val3", "val4", "val5", "val6", "val7", "val8",
   };
 
   const bool kEnabled = true;

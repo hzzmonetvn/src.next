@@ -14,7 +14,6 @@
 #include "base/unguessable_token.h"
 #include "content/browser/browsing_instance.h"
 #include "content/browser/renderer_host/agent_scheduling_group_host.h"
-#include "content/browser/security/coop/coop_related_group.h"
 #include "content/common/content_export.h"
 #include "content/public/browser/browsing_instance_id.h"
 #include "content/public/browser/render_process_host_observer.h"
@@ -64,8 +63,16 @@ struct ChildProcessTerminationInfo;
 // may outlive this (e.g., when kept alive by NavigationEntry), in which case
 // they will get a new SiteInstanceGroup the next time one is needed.
 // SiteInstanceGroups are refcounted by the SiteInstances using them, allowing
-// for flexible policies. Currently, each SiteInstanceGroup has exactly one
-// SiteInstance. See crbug.com/1195535.
+// for flexible policies. A SiteInstanceGroup may contain multiple SiteInstances
+// in the following cases:
+// - Subframe data: URLs get their own SiteInstance in the same group as their
+//   initiator (see features::kSiteInstanceGroupsForDataUrls).
+// - When not all sites require a dedicated process (e.g., on Android),
+//   SiteInstances for sites that don't require isolation are placed in a
+//   default SiteInstanceGroup per BrowsingInstance, rather than sharing a
+//   default SiteInstance (see features::kDefaultSiteInstanceGroups).
+// Otherwise, each SiteInstanceGroup has exactly one SiteInstance. See
+// crbug.com/40176090.
 class CONTENT_EXPORT SiteInstanceGroup
     : public base::RefCounted<SiteInstanceGroup>,
       public RenderProcessHostObserver {
@@ -97,6 +104,7 @@ class CONTENT_EXPORT SiteInstanceGroup
   SiteInstanceGroupId GetId() const;
 
   base::SafeRef<SiteInstanceGroup> GetSafeRef();
+  base::WeakPtr<SiteInstanceGroup> GetWeakPtr();
   // TODO(crbug.com/40258727): Remove this. Please don't use it.
   base::WeakPtr<SiteInstanceGroup> GetWeakPtrToAllowDangling();
 
@@ -134,12 +142,6 @@ class CONTENT_EXPORT SiteInstanceGroup
   // used when a SiteInstanceGroup is available.
   bool IsRelatedSiteInstanceGroup(SiteInstanceGroup* group);
 
-  // Returns true if `group` is in the same CoopRelatedGroup as `this`. This can
-  // be true even though IsRelatedSiteInstanceGroup returns false, if the two
-  // SiteInstanceGroups are for different BrowsingInstances in the same
-  // CoopRelatedGroup.
-  bool IsCoopRelatedSiteInstanceGroup(SiteInstanceGroup* group);
-
   // Get the number of active frames which belong to this SiteInstanceGroup. If
   // there are no active frames left, all frames in this SiteInstanceGroup can
   // be safely discarded.
@@ -160,14 +162,9 @@ class CONTENT_EXPORT SiteInstanceGroup
     return browsing_instance_->token();
   }
 
-  // Returns the token uniquely identifying the CoopRelatedGroup this
-  // SiteInstanceGroup belongs to.
-  base::UnguessableToken coop_related_group_token() const {
-    return browsing_instance_->coop_related_group_token();
-  }
-
   AgentSchedulingGroupHost& agent_scheduling_group() {
-    DCHECK_EQ(agent_scheduling_group_->GetProcess(), &*process_);
+    CHECK_EQ(agent_scheduling_group_->GetProcess(), &*process_,
+             base::NotFatalUntil::M159);
     return *agent_scheduling_group_;
   }
 

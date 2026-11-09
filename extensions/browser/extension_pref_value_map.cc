@@ -4,14 +4,19 @@
 
 #include "extensions/browser/extension_pref_value_map.h"
 
+#include <algorithm>
+#include <tuple>
 #include <utility>
+#include <vector>
 
+#include "base/containers/to_vector.h"
 #include "base/memory/ptr_util.h"
 #include "base/observer_list.h"
 #include "base/time/time.h"
 #include "base/values.h"
 #include "components/prefs/pref_value_map.h"
 #include "extensions/common/api/types.h"
+#include "extensions/common/extension.h"
 #include "extensions/common/extension_id.h"
 
 struct ExtensionPrefValueMap::ExtensionEntry {
@@ -34,8 +39,17 @@ struct ExtensionPrefValueMap::ExtensionEntry {
   PrefValueMap incognito_profile_preferences_session_only;
 };
 
-ExtensionPrefValueMap::ExtensionPrefValueMap() : destroyed_(false) {
+ExtensionPrefValueMap::ExtensionPrefValueMap(
+    extensions::ExtensionRegistry* registry)
+    : destroyed_(false) {
+  // The registry can be null in unit tests.
+  if (registry) {
+    registry_observation_.Observe(registry);
+  }
 }
+
+ExtensionPrefValueMap::ExtensionPrefValueMap()
+    : ExtensionPrefValueMap(nullptr) {}
 
 ExtensionPrefValueMap::~ExtensionPrefValueMap() {
   if (!destroyed_) {
@@ -45,8 +59,27 @@ ExtensionPrefValueMap::~ExtensionPrefValueMap() {
 }
 
 void ExtensionPrefValueMap::Shutdown() {
+  registry_observation_.Reset();
   NotifyOfDestruction();
   destroyed_ = true;
+}
+
+void ExtensionPrefValueMap::OnExtensionLoaded(
+    content::BrowserContext* browser_context,
+    const extensions::Extension* extension) {
+  SetExtensionState(extension->id(), true);
+}
+
+void ExtensionPrefValueMap::OnExtensionUnloaded(
+    content::BrowserContext* browser_context,
+    const extensions::Extension* extension,
+    extensions::UnloadedExtensionReason reason) {
+  SetExtensionState(extension->id(), false);
+}
+
+void ExtensionPrefValueMap::OnShutdown(
+    extensions::ExtensionRegistry* registry) {
+  registry_observation_.Reset();
 }
 
 void ExtensionPrefValueMap::SetExtensionPref(const std::string& ext_id,
@@ -54,16 +87,18 @@ void ExtensionPrefValueMap::SetExtensionPref(const std::string& ext_id,
                                              ChromeSettingScope scope,
                                              base::Value value) {
   PrefValueMap* prefs = GetExtensionPrefValueMap(ext_id, scope);
-  if (prefs->SetValue(key, std::move(value)))
+  if (prefs->SetValue(key, std::move(value))) {
     NotifyPrefValueChanged(key);
+  }
 }
 
 void ExtensionPrefValueMap::RemoveExtensionPref(const std::string& ext_id,
                                                 const std::string& key,
                                                 ChromeSettingScope scope) {
   PrefValueMap* prefs = GetExtensionPrefValueMap(ext_id, scope);
-  if (prefs->RemoveValue(key))
+  if (prefs->RemoveValue(key)) {
     NotifyPrefValueChanged(key);
+  }
 }
 
 bool ExtensionPrefValueMap::CanExtensionControlPref(
@@ -75,15 +110,17 @@ bool ExtensionPrefValueMap::CanExtensionControlPref(
     NOTREACHED() << "Extension " << extension_id
                  << " is not registered but accesses pref " << pref_key
                  << " (incognito: " << incognito << ")."
-                 << " http://crbug.com/454513";
+                 << " http://crbug.com/40403830";
   }
 
-  if (incognito && !ext->second->incognito_enabled)
+  if (incognito && !ext->second->incognito_enabled) {
     return false;
+  }
 
   auto winner = GetEffectivePrefValueController(pref_key, incognito, nullptr);
-  if (winner == entries_.end())
+  if (winner == entries_.end()) {
     return true;
+  }
 
   return winner->second->install_time <= ext->second->install_time;
 }
@@ -111,8 +148,9 @@ bool ExtensionPrefValueMap::DoesExtensionControlPref(
   bool incognito = (from_incognito != nullptr);
   auto winner =
       GetEffectivePrefValueController(pref_key, incognito, from_incognito);
-  if (winner == entries_.end())
+  if (winner == entries_.end()) {
     return false;
+  }
   return winner->first == extension_id;
 }
 
@@ -132,8 +170,9 @@ void ExtensionPrefValueMap::RegisterExtension(const std::string& ext_id,
 
 void ExtensionPrefValueMap::UnregisterExtension(const std::string& ext_id) {
   auto i = entries_.find(ext_id);
-  if (i == entries_.end())
+  if (i == entries_.end()) {
     return;
+  }
   std::set<std::string> keys;  // keys set by this extension
   GetExtensionControlledKeys(*(i->second.get()), &keys);
 
@@ -147,10 +186,12 @@ void ExtensionPrefValueMap::SetExtensionState(const std::string& ext_id,
   ExtensionEntryMap::const_iterator i = entries_.find(ext_id);
   // This may happen when sync sets the extension state for an
   // extension that is not installed.
-  if (i == entries_.end())
+  if (i == entries_.end()) {
     return;
-  if (i->second->enabled == is_enabled)
+  }
+  if (i->second->enabled == is_enabled) {
     return;
+  }
   std::set<std::string> keys;  // keys set by this extension
   GetExtensionControlledKeys(*(i->second), &keys);
   i->second->enabled = is_enabled;
@@ -163,10 +204,12 @@ void ExtensionPrefValueMap::SetExtensionIncognitoState(
   ExtensionEntryMap::const_iterator i = entries_.find(ext_id);
   // This may happen when sync sets the extension state for an
   // extension that is not installed.
-  if (i == entries_.end())
+  if (i == entries_.end()) {
     return;
-  if (i->second->incognito_enabled == is_incognito_enabled)
+  }
+  if (i->second->incognito_enabled == is_incognito_enabled) {
     return;
+  }
   std::set<std::string> keys;  // keys set by this extension
   GetExtensionControlledKeys(*(i->second), &keys);
   i->second->incognito_enabled = is_incognito_enabled;
@@ -241,10 +284,13 @@ void ExtensionPrefValueMap::GetExtensionControlledKeys(
 const base::Value* ExtensionPrefValueMap::GetEffectivePrefValue(
     const std::string& key,
     bool incognito,
-    bool* from_incognito) const {
-  auto winner = GetEffectivePrefValueController(key, incognito, from_incognito);
-  if (winner == entries_.end())
+    bool* from_incognito,
+    std::optional<std::string> ignore_extension_id) const {
+  auto winner = GetEffectivePrefValueController(key, incognito, from_incognito,
+                                                ignore_extension_id);
+  if (winner == entries_.end()) {
     return nullptr;
+  }
 
   const base::Value* value = nullptr;
   const std::string& ext_id = winner->first;
@@ -255,23 +301,26 @@ const base::Value* ExtensionPrefValueMap::GetEffectivePrefValue(
     const PrefValueMap* prefs = GetExtensionPrefValueMap(
         ext_id, ChromeSettingScope::kIncognitoSessionOnly);
     prefs->GetValue(key, &value);
-    if (value)
+    if (value) {
       return value;
+    }
 
     // If no incognito session only preference exists, fall back to persistent
     // incognito preference.
     prefs = GetExtensionPrefValueMap(ext_id,
                                      ChromeSettingScope::kIncognitoPersistent);
     prefs->GetValue(key, &value);
-    if (value)
+    if (value) {
       return value;
+    }
   } else {
     // Regular-only preference.
     const PrefValueMap* prefs =
         GetExtensionPrefValueMap(ext_id, ChromeSettingScope::kRegularOnly);
     prefs->GetValue(key, &value);
-    if (value)
+    if (value) {
       return value;
+    }
   }
 
   // Regular preference.
@@ -285,7 +334,8 @@ ExtensionPrefValueMap::ExtensionEntryMap::const_iterator
 ExtensionPrefValueMap::GetEffectivePrefValueController(
     const std::string& key,
     bool incognito,
-    bool* from_incognito) const {
+    bool* from_incognito,
+    std::optional<std::string> ignore_extension_id) const {
   auto winner = entries_.cend();
   base::Time winners_install_time;
 
@@ -295,12 +345,18 @@ ExtensionPrefValueMap::GetEffectivePrefValueController(
     const bool enabled = i->second->enabled;
     const bool incognito_enabled = i->second->incognito_enabled;
 
-    if (!enabled)
+    if (!enabled) {
       continue;
-    if (install_time < winners_install_time)
+    }
+    if (install_time < winners_install_time) {
       continue;
-    if (incognito && !incognito_enabled)
+    }
+    if (incognito && !incognito_enabled) {
       continue;
+    }
+    if (ignore_extension_id && *ignore_extension_id == ext_id) {
+      continue;
+    }
 
     const base::Value* value = nullptr;
     const PrefValueMap* prefs =
@@ -308,8 +364,9 @@ ExtensionPrefValueMap::GetEffectivePrefValueController(
     if (prefs->GetValue(key, &value)) {
       winner = i;
       winners_install_time = install_time;
-      if (from_incognito)
+      if (from_incognito) {
         *from_incognito = false;
+      }
     }
 
     if (!incognito) {
@@ -318,8 +375,9 @@ ExtensionPrefValueMap::GetEffectivePrefValueController(
       if (prefs->GetValue(key, &value)) {
         winner = i;
         winners_install_time = install_time;
-        if (from_incognito)
+        if (from_incognito) {
           *from_incognito = false;
+        }
       }
       // Ignore the following prefs, because they're incognito-only.
       continue;
@@ -330,8 +388,9 @@ ExtensionPrefValueMap::GetEffectivePrefValueController(
     if (prefs->GetValue(key, &value)) {
       winner = i;
       winners_install_time = install_time;
-      if (from_incognito)
+      if (from_incognito) {
         *from_incognito = true;
+      }
     }
 
     prefs = GetExtensionPrefValueMap(ext_id,
@@ -339,8 +398,9 @@ ExtensionPrefValueMap::GetEffectivePrefValueController(
     if (prefs->GetValue(key, &value)) {
       winner = i;
       winners_install_time = install_time;
-      if (from_incognito)
+      if (from_incognito) {
         *from_incognito = true;
+      }
     }
   }
   return winner;
@@ -369,9 +429,37 @@ void ExtensionPrefValueMap::RemoveObserver(
 std::string ExtensionPrefValueMap::GetExtensionControllingPref(
     const std::string& pref_key) const {
   auto winner = GetEffectivePrefValueController(pref_key, false, nullptr);
-  if (winner == entries_.end())
+  if (winner == entries_.end()) {
     return std::string();
+  }
   return winner->first;
+}
+
+extensions::ExtensionIdList
+ExtensionPrefValueMap::GetExtensionsSettingPrefByPrecedence(
+    const std::string& pref_key) const {
+  // Candidates as GetEffectivePrefValueController() picks them for a regular
+  // profile.
+  std::vector<ExtensionEntryMap::const_iterator> candidates;
+  for (auto i = entries_.cbegin(); i != entries_.cend(); ++i) {
+    const ExtensionEntry& entry = *i->second;
+    if (!entry.enabled) {
+      continue;
+    }
+    const base::Value* value = nullptr;
+    if (entry.regular_profile_preferences.GetValue(pref_key, &value) ||
+        entry.regular_only_profile_preferences.GetValue(pref_key, &value)) {
+      candidates.push_back(i);
+    }
+  }
+  // Later install wins; GetEffectivePrefValueController() breaks ties toward
+  // the later entry in `entries_`, i.e. the greater ID.
+  std::ranges::sort(candidates, [](const auto& a, const auto& b) {
+    return std::tie(a->second->install_time, a->first) >
+           std::tie(b->second->install_time, b->first);
+  });
+  return base::ToVector(candidates,
+                        [](const auto& candidate) { return candidate->first; });
 }
 
 void ExtensionPrefValueMap::NotifyInitializationCompleted() {

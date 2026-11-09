@@ -46,10 +46,10 @@
 
 #include <algorithm>
 #include <memory>
+#include <ranges>
 
 #include "base/types/optional_util.h"
 #include "third_party/blink/public/platform/platform.h"
-#include "third_party/blink/renderer/core/layout/layout_multi_column_flow_thread.h"
 #include "third_party/blink/renderer/core/layout/layout_view.h"
 #include "third_party/blink/renderer/core/paint/paint_layer.h"
 #include "third_party/blink/renderer/core/paint/paint_layer_scrollable_area.h"
@@ -85,14 +85,14 @@ void PaintLayerStackingNode::DirtyZOrderLists() {
 static bool ZIndexLessThan(const PaintLayer* first, const PaintLayer* second) {
   DCHECK(first->GetLayoutObject().IsStacked());
   DCHECK(second->GetLayoutObject().IsStacked());
-  return first->GetLayoutObject().StyleRef().EffectiveZIndex() <
-         second->GetLayoutObject().StyleRef().EffectiveZIndex();
+  return first->GetLayoutObject().Style().EffectiveZIndex() <
+         second->GetLayoutObject().Style().EffectiveZIndex();
 }
 
 static bool SetIfHigher(const PaintLayer*& first, const PaintLayer* second) {
   if (!second)
     return false;
-  DCHECK_GE(second->GetLayoutObject().StyleRef().EffectiveZIndex(), 0);
+  DCHECK_GE(second->GetLayoutObject().Style().EffectiveZIndex(), 0);
   // |second| appears later in the tree, so it's higher than |first| if its
   // z-index >= |first|'s z-index.
   if (!first || !ZIndexLessThan(second, first)) {
@@ -136,7 +136,7 @@ struct PaintLayerStackingNode::HighestLayers {
 
   static LayerType GetLayerType(const PaintLayer& layer) {
     DCHECK(layer.GetLayoutObject().IsStacked());
-    const auto& style = layer.GetLayoutObject().StyleRef();
+    const auto& style = layer.GetLayoutObject().Style();
     if (style.GetPosition() == EPosition::kAbsolute)
       return kAbsolutePosition;
     if (style.GetPosition() == EPosition::kFixed)
@@ -145,14 +145,20 @@ struct PaintLayerStackingNode::HighestLayers {
   }
 
   void Update(const PaintLayer& layer) {
-    const auto& style = layer.GetLayoutObject().StyleRef();
+    const auto& style = layer.GetLayoutObject().Style();
     // We only need to consider zero or positive z-index stacked child for
     // candidates of causing reparent of overlay scrollbars of ancestors.
     // A negative z-index child will not cause reparent of overlay scrollbars
     // because the ancestor scroller either has auto z-index which is above
     // the child or has negative z-index which is a stacking context.
-    if (!layer.GetLayoutObject().IsStacked() || style.EffectiveZIndex() < 0)
+    if (!layer.GetLayoutObject().IsStacked() || style.EffectiveZIndex() < 0) {
       return;
+    }
+
+    // We should not consider layers that have been omitted from z-order lists.
+    if (!layer.IsZOrderListVisible()) {
+      return;
+    }
 
     UpdateOrderForSubtreeHighestLayers(GetLayerType(layer), &layer);
   }
@@ -178,13 +184,13 @@ struct PaintLayerStackingNode::HighestLayers {
   }
 };
 
-static LayoutObject* ChildOfFlexboxOrGridParentOrGrandparent(
+static LayoutObject* ChildOfFlexboxOrGridOrGridLanesParentOrGrandparent(
     const PaintLayer* layer) {
   LayoutObject* parent = layer->GetLayoutObject().Parent();
   if (!parent) {
     return nullptr;
   }
-  if (parent->IsFlexibleBox() || parent->IsLayoutGrid()) {
+  if (parent->IsFlexibleBox() || parent->IsLayoutGridOrGridLanes()) {
     return &layer->GetLayoutObject();
   }
 
@@ -192,7 +198,7 @@ static LayoutObject* ChildOfFlexboxOrGridParentOrGrandparent(
   if (!grandparent) {
     return nullptr;
   }
-  if (grandparent->IsFlexibleBox() || grandparent->IsLayoutGrid()) {
+  if (grandparent->IsFlexibleBox() || grandparent->IsLayoutGridOrGridLanes()) {
     return parent;
   }
   return nullptr;
@@ -201,9 +207,10 @@ static LayoutObject* ChildOfFlexboxOrGridParentOrGrandparent(
 static bool OrderLessThan(const PaintLayer* first, const PaintLayer* second) {
   // TODO(chrishtr): make this work for arbitrary ancestors, not just parent
   // and grandparent.
-  LayoutObject* first_ancestor = ChildOfFlexboxOrGridParentOrGrandparent(first);
+  LayoutObject* first_ancestor =
+      ChildOfFlexboxOrGridOrGridLanesParentOrGrandparent(first);
   LayoutObject* second_ancestor =
-      ChildOfFlexboxOrGridParentOrGrandparent(second);
+      ChildOfFlexboxOrGridOrGridLanesParentOrGrandparent(second);
   if (!first_ancestor || !second_ancestor) {
     return false;
   }
@@ -212,8 +219,8 @@ static bool OrderLessThan(const PaintLayer* first, const PaintLayer* second) {
     return false;
   }
 
-  auto& first_style = first_ancestor->StyleRef();
-  auto& second_style = second_ancestor->StyleRef();
+  auto& first_style = first_ancestor->Style();
+  auto& second_style = second_ancestor->Style();
   int first_order = 0;
   int second_order = 0;
   // Out of flow flexbox direct children paint as if order was 0:
@@ -229,19 +236,48 @@ static bool OrderLessThan(const PaintLayer* first, const PaintLayer* second) {
   return first_order < second_order;
 }
 
-// Returns the children of |paint_layer|, sorted by the order CSS property
-// if they are the child of a flexbox. See:
+// Returns true if the children of `layer` may need ordering by `OrderLessThan`.
+static bool ChildrenMayBeAffectedByOrder(const PaintLayer& layer) {
+  PaintLayer* child = layer.FirstChild();
+  if (!child || !child->NextSibling()) {
+    // Not enough children to need re-ordering.
+    return false;
+  }
+  for (; child; child = child->NextSibling()) {
+    auto* ancestor = ChildOfFlexboxOrGridOrGridLanesParentOrGrandparent(child);
+    // This is the only case where `OrderLessThan` can return true;
+    if (ancestor && ancestor->Style().Order()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Calls `function` for the children of `layer`, sorted by the order CSS
+// property if they are the child of a flexbox. See:
 // https://www.w3.org/TR/css-flexbox-1/#painting
-static void GetOrderSortedChildren(
-    PaintLayer* paint_layer,
-    PaintLayerStackingNode::PaintLayers& sorted_children) {
-  for (PaintLayer* child = paint_layer->FirstChild(); child;
-       child = child->NextSibling()) {
-    sorted_children.push_back(child);
+static void ForAllChildrenSortedByOrder(
+    PaintLayer& layer,
+    base::FunctionRef<void(PaintLayer&)> function) {
+  // Optimization: `order` is relatively rare and we can avoid needing to
+  // create and sort the vector of children in most cases.
+  if (!ChildrenMayBeAffectedByOrder(layer)) {
+    for (auto* child = layer.FirstChild(); child;
+         child = child->NextSibling()) {
+      function(*child);
+    }
+    return;
   }
 
+  HeapVector<Member<PaintLayer>> sorted_children;
+  for (auto* child = layer.FirstChild(); child; child = child->NextSibling()) {
+    sorted_children.push_back(child);
+  }
   std::stable_sort(sorted_children.begin(), sorted_children.end(),
                    OrderLessThan);
+  for (auto& child : sorted_children) {
+    function(*child);
+  }
 }
 
 void PaintLayerStackingNode::RebuildZOrderLists() {
@@ -251,11 +287,12 @@ void PaintLayerStackingNode::RebuildZOrderLists() {
   DCHECK(z_order_lists_dirty_);
 
   layer_->SetNeedsReorderOverlayOverflowControls(false);
-  PaintLayers order_sorted_children;
-  GetOrderSortedChildren(layer_, order_sorted_children);
-  for (auto& child : order_sorted_children) {
-    CollectLayers(*child, nullptr);
-  }
+
+  PaintLayers overscroll_area_parents;
+  ForAllChildrenSortedByOrder(
+      *layer_, [this, &overscroll_area_parents](PaintLayer& child) {
+        CollectLayers(child, nullptr, overscroll_area_parents);
+      });
 
   // Sort the two lists.
   std::stable_sort(pos_z_order_list_.begin(), pos_z_order_list_.end(),
@@ -263,18 +300,21 @@ void PaintLayerStackingNode::RebuildZOrderLists() {
   std::stable_sort(neg_z_order_list_.begin(), neg_z_order_list_.end(),
                    ZIndexLessThan);
 
+  // Append overscroll area parent layers after all normal layers in this
+  // stacking context. Note that these are appended in reverse order to match
+  // the overscroll chaining order (last one is one overscrolls first and is on
+  // the bottom of a stack).
+  for (auto& overscroll_area_parent :
+       std::views::reverse(overscroll_area_parents)) {
+    pos_z_order_list_.push_back(overscroll_area_parent);
+  }
+
   // Append layers for top layer elements after normal layer collection, to
   // ensure they are on top regardless of z-indexes.  The layoutObjects of top
   // layer elements are children of the view, sorted in top layer stacking
   // order.
   if (layer_->IsRootLayer()) {
     LayoutBlockFlow* root_block = layer_->GetLayoutObject().View();
-    // If the viewport is paginated, everything (including "top-layer" elements)
-    // gets redirected to the flow thread. So that's where we have to look, in
-    // that case.
-    if (LayoutBlockFlow* multi_column_flow_thread =
-            root_block->MultiColumnFlowThread())
-      root_block = multi_column_flow_thread;
     for (LayoutObject* child = root_block->FirstChild(); child;
          child = child->NextSibling()) {
       if (child->IsInTopOrViewTransitionLayer() && child->IsStacked()) {
@@ -282,14 +322,23 @@ void PaintLayerStackingNode::RebuildZOrderLists() {
       }
     }
   }
+
   z_order_lists_dirty_ = false;
 }
 
-void PaintLayerStackingNode::CollectLayers(PaintLayer& paint_layer,
-                                           HighestLayers* highest_layers) {
+void PaintLayerStackingNode::CollectLayers(
+    PaintLayer& paint_layer,
+    HighestLayers* highest_layers,
+    PaintLayers& overscroll_area_parents) {
   paint_layer.SetNeedsReorderOverlayOverflowControls(false);
 
   if (paint_layer.IsInTopOrViewTransitionLayer()) {
+    return;
+  }
+
+  if (paint_layer.GetLayoutObject().IsOverscrollAreaParent()) {
+    CHECK(paint_layer.GetLayoutObject().IsStacked());
+    overscroll_area_parents.push_back(&paint_layer);
     return;
   }
 
@@ -297,12 +346,14 @@ void PaintLayerStackingNode::CollectLayers(PaintLayer& paint_layer,
     highest_layers->Update(paint_layer);
 
   const auto& object = paint_layer.GetLayoutObject();
-  const auto& style = object.StyleRef();
+  const auto& style = object.Style();
 
   if (object.IsStacked()) {
-    auto& list =
-        style.EffectiveZIndex() >= 0 ? pos_z_order_list_ : neg_z_order_list_;
-    list.push_back(paint_layer);
+    if (paint_layer.IsZOrderListVisible()) {
+      auto& list =
+          style.EffectiveZIndex() >= 0 ? pos_z_order_list_ : neg_z_order_list_;
+      list.push_back(paint_layer);
+    }
   }
 
   if (object.IsStackingContext())
@@ -315,11 +366,12 @@ void PaintLayerStackingNode::CollectLayers(PaintLayer& paint_layer,
   if (has_overlay_overflow_controls || highest_layers)
     subtree_highest_layers.emplace();
 
-  PaintLayers order_sorted_children;
-  GetOrderSortedChildren(&paint_layer, order_sorted_children);
-  for (auto& child : order_sorted_children) {
-    CollectLayers(*child, base::OptionalToPtr(subtree_highest_layers));
-  }
+  ForAllChildrenSortedByOrder(
+      paint_layer, [this, &subtree_highest_layers,
+                    &overscroll_area_parents](PaintLayer& child) {
+        CollectLayers(child, base::OptionalToPtr(subtree_highest_layers),
+                      overscroll_area_parents);
+      });
 
   if (has_overlay_overflow_controls) {
     DCHECK(subtree_highest_layers);
@@ -338,7 +390,7 @@ void PaintLayerStackingNode::CollectLayers(PaintLayer& paint_layer,
     if (layer_to_paint_overlay_overflow_controls_after) {
       layer_to_overlay_overflow_controls_painting_after_
           .insert(layer_to_paint_overlay_overflow_controls_after,
-                  MakeGarbageCollected<PaintLayers>())
+                  MakeGarbageCollected<GCedPaintLayers>())
           .stored_value->value->push_back(paint_layer);
     }
     paint_layer.SetNeedsReorderOverlayOverflowControls(
@@ -363,7 +415,7 @@ bool PaintLayerStackingNode::StyleDidChange(PaintLayer& paint_layer,
     was_stacked = paint_layer.GetLayoutObject().IsStacked(*old_style);
   }
 
-  const ComputedStyle& new_style = paint_layer.GetLayoutObject().StyleRef();
+  const ComputedStyle& new_style = paint_layer.GetLayoutObject().Style();
 
   bool should_be_stacking_context =
       paint_layer.GetLayoutObject().IsStackingContext();

@@ -5,16 +5,35 @@
 #include "chrome/browser/extensions/extension_tab_util.h"
 
 #include "base/json/json_reader.h"
+#include "base/strings/stringprintf.h"
 #include "base/test/gmock_expected_support.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/values.h"
+#include "build/build_config.h"
 #include "chrome/browser/extensions/extension_service_test_base.h"
 #include "chrome/browser/extensions/extension_util.h"
+#include "chrome/test/base/chrome_render_view_host_test_harness.h"
+#include "components/sessions/content/session_tab_helper.h"
 #include "components/sync_preferences/testing_pref_service_syncable.h"
+#include "content/public/test/web_contents_tester.h"
+#include "extensions/browser/extension_registrar.h"
 #include "extensions/browser/pref_names.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/extension_builder.h"
+#include "extensions/common/extension_features.h"
+#include "extensions/common/manifest_handlers/options_page_info.h"
 #include "extensions/common/mojom/context_type.mojom.h"
+#include "extensions/common/permissions/permission_set.h"
+#include "extensions/common/permissions/permissions_data.h"
+#include "extensions/common/url_pattern_set.h"
 #include "testing/gtest/include/gtest/gtest.h"
+
+#if BUILDFLAG(IS_CHROMEOS)
+#include "ash/webui/os_feedback_ui/url_constants.h"
+#endif
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -49,6 +68,64 @@ TEST(ExtensionTabUtilTest, ScrubTabBehaviorForHostPermission) {
       ExtensionTabUtil::GetScrubTabBehavior(
           extension.get(), mojom::ContextType::kUnspecified,
           GURL("http://www.google.com/some/path"));
+  EXPECT_EQ(ExtensionTabUtil::kDontScrubTab, scrub_tab_behavior.committed_info);
+  EXPECT_EQ(ExtensionTabUtil::kDontScrubTab, scrub_tab_behavior.pending_info);
+}
+
+TEST(ExtensionTabUtilTest, ScrubTabBehaviorForPolicyBlockedHost) {
+  auto extension = ExtensionBuilder("Extension with host permission")
+                       .AddHostPermission("*://www.google.com/*")
+                       .Build();
+  URLPatternSet policy_blocked_hosts;
+  policy_blocked_hosts.AddOrigin(Extension::kValidHostPermissionSchemes,
+                                 GURL("http://www.google.com"));
+  extension->permissions_data()->SetPolicyHostRestrictions(policy_blocked_hosts,
+                                                           URLPatternSet());
+
+  ExtensionTabUtil::ScrubTabBehavior scrub_tab_behavior =
+      ExtensionTabUtil::GetScrubTabBehavior(
+          extension.get(), mojom::ContextType::kUnspecified,
+          GURL("http://www.google.com/some/path"));
+  EXPECT_EQ(ExtensionTabUtil::kScrubTabFully,
+            scrub_tab_behavior.committed_info);
+  EXPECT_EQ(ExtensionTabUtil::kScrubTabFully, scrub_tab_behavior.pending_info);
+}
+
+TEST(ExtensionTabUtilTest, ScrubTabBehaviorForUserBlockedHost) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(
+      extensions_features::kExtensionsMenuAccessControl);
+
+  constexpr int kContextId = 1;
+  auto extension = ExtensionBuilder("Extension with host permission")
+                       .AddHostPermission("*://www.google.com/*")
+                       .Build();
+  extension->permissions_data()->SetContextId(kContextId);
+
+  URLPatternSet user_blocked_hosts;
+  user_blocked_hosts.AddOrigin(Extension::kValidHostPermissionSchemes,
+                               GURL("http://www.google.com"));
+  PermissionsData::SetUserHostRestrictions(
+      kContextId, std::move(user_blocked_hosts), URLPatternSet());
+
+  ExtensionTabUtil::ScrubTabBehavior scrub_tab_behavior =
+      ExtensionTabUtil::GetScrubTabBehavior(
+          extension.get(), mojom::ContextType::kUnspecified,
+          GURL("http://www.google.com/some/path"));
+  EXPECT_EQ(ExtensionTabUtil::kScrubTabFully,
+            scrub_tab_behavior.committed_info);
+  EXPECT_EQ(ExtensionTabUtil::kScrubTabFully, scrub_tab_behavior.pending_info);
+}
+
+TEST(ExtensionTabUtilTest, ScrubTabBehaviorForExtensionOwnOrigin_GURL) {
+  auto extension = ExtensionBuilder("Extension with activeTab permission")
+                       .AddAPIPermission("activeTab")
+                       .Build();
+  GURL options_url = extension->GetResourceURL("options.html");
+  ExtensionTabUtil::ScrubTabBehavior scrub_tab_behavior =
+      ExtensionTabUtil::GetScrubTabBehavior(
+          extension.get(), mojom::ContextType::kPrivilegedExtension,
+          options_url);
   EXPECT_EQ(ExtensionTabUtil::kDontScrubTab, scrub_tab_behavior.committed_info);
   EXPECT_EQ(ExtensionTabUtil::kDontScrubTab, scrub_tab_behavior.pending_info);
 }
@@ -91,6 +168,12 @@ TEST(ExtensionTabUtilTest, ResolvePossiblyRelativeURL) {
       GURL("chrome-extension://jpignaibiiemhngfjkcpokkamffknabf/path"));
   EXPECT_EQ(ExtensionTabUtil::ResolvePossiblyRelativeURL("path", nullptr),
             GURL("path"));
+}
+
+// Verifies that ExtensionTabUtil::SupportsTabGroups returns false gracefully
+// when passed a null BrowserWindowInterface.
+TEST(ExtensionTabUtilTest, SupportsTabGroups_NullBrowser) {
+  EXPECT_FALSE(ExtensionTabUtil::SupportsTabGroups(nullptr));
 }
 
 class ChromeExtensionNavigationTest : public ExtensionServiceTestBase {
@@ -178,7 +261,7 @@ TEST_F(ChromeExtensionNavigationTest, PrepareURLForNavigation) {
         kFileURLWithAccess, extension.get(), browser_context());
     EXPECT_THAT(url, base::test::ValueIs(GURL(kFileURLWithAccess)));
   }
-  // Regression test for crbug.com/1487908. Ensure that file URLs are returned
+  // Regression test for crbug.com/40073743. Ensure that file URLs are returned
   // when the call originates from non-extension contexts (e.g. WebUI contexts).
   {
     const std::string kFileURL("file:///etc/passwd");
@@ -186,6 +269,85 @@ TEST_F(ChromeExtensionNavigationTest, PrepareURLForNavigation) {
         kFileURL, /*extension=*/nullptr, browser_context());
     EXPECT_THAT(url, base::test::ValueIs(GURL(kFileURL)));
   }
+  // Regression test for crbug.com/348405962.
+  {
+    const std::string kTestPath("mailto:8080?cc=&bcc=&subject=&body=");
+    auto url = ExtensionTabUtil::PrepareURLForNavigation(
+        kTestPath, extension.get(), browser_context());
+    EXPECT_THAT(url, base::test::ValueIs(GURL(kTestPath)));
+  }
+}
+
+// Regression test for https://crbug.com/496615345. Tests that when an extension
+// has a tab-specific permission (e.g. activeTab) granted for a specific origin,
+// GetScrubTabBehavior scrubs cross-origin URLs on that tab even if the tab's
+// temporary permissions have not yet been revoked.
+TEST_F(ChromeExtensionNavigationTest,
+       ScrubTabBehaviorForTabSpecificPermissionOriginScoped) {
+  auto extension = ExtensionBuilder("Extension with activeTab permission")
+                       .AddAPIPermission("activeTab")
+                       .Build();
+  std::unique_ptr<content::WebContents> web_contents(
+      content::WebContentsTester::CreateTestWebContents(profile(), nullptr));
+  sessions::SessionTabHelper::CreateForWebContents(web_contents.get(),
+                                                   base::NullCallback());
+  content::WebContentsTester::For(web_contents.get())
+      ->NavigateAndCommit(GURL("http://www.google.com/some/path"));
+  // Simulate the extension having activeTab on this tab by directly populating
+  // tab-specific permissions in PermissionsData (avoiding async CORS and IPC
+  // side effects from ActiveTabPermissionGranter in a unittest).
+  const int kTabId = ExtensionTabUtil::GetTabId(web_contents.get());
+  APIPermissionSet apis;
+  apis.insert(mojom::APIPermissionID::kTab);
+  URLPatternSet hosts;
+  hosts.AddOrigin(URLPattern::SCHEME_ALL, GURL("http://www.google.com"));
+  PermissionSet tab_permissions(std::move(apis), ManifestPermissionSet(),
+                                hosts.Clone(), hosts.Clone());
+  extension->permissions_data()->UpdateTabSpecificPermissions(kTabId,
+                                                              tab_permissions);
+
+  ExtensionTabUtil::ScrubTabBehavior scrub_tab_behavior =
+      ExtensionTabUtil::GetScrubTabBehavior(extension.get(),
+                                            mojom::ContextType::kUnspecified,
+                                            web_contents.get());
+  EXPECT_EQ(ExtensionTabUtil::kDontScrubTab, scrub_tab_behavior.committed_info);
+
+  content::WebContentsTester::For(web_contents.get())
+      ->NavigateAndCommit(GURL("http://www.evil.com/some/path"));
+  scrub_tab_behavior = ExtensionTabUtil::GetScrubTabBehavior(
+      extension.get(), mojom::ContextType::kUnspecified, web_contents.get());
+  EXPECT_EQ(ExtensionTabUtil::kScrubTabFully,
+            scrub_tab_behavior.committed_info);
+}
+
+// Tests that an extension without global "tabs" or explicit host permissions
+// (such as an extension with only activeTab) does NOT have its own origin URLs
+// scrubbed when navigating or querying tabs.
+TEST_F(ChromeExtensionNavigationTest,
+       ScrubTabBehaviorForExtensionOwnOrigin_WebContents) {
+  auto extension = ExtensionBuilder("Extension without permissions").Build();
+  ExtensionRegistrar::Get(profile())->AddExtension(extension);
+
+  std::unique_ptr<content::WebContents> web_contents(
+      content::WebContentsTester::CreateTestWebContents(profile(), nullptr));
+  sessions::SessionTabHelper::CreateForWebContents(web_contents.get(),
+                                                   base::NullCallback());
+
+  GURL options_url = extension->GetResourceURL("options.html");
+  content::WebContentsTester::For(web_contents.get())
+      ->NavigateAndCommit(options_url);
+
+  ExtensionTabUtil::ScrubTabBehavior scrub_tab_behavior =
+      ExtensionTabUtil::GetScrubTabBehavior(
+          extension.get(), mojom::ContextType::kPrivilegedExtension,
+          web_contents.get());
+  EXPECT_EQ(ExtensionTabUtil::kDontScrubTab, scrub_tab_behavior.committed_info);
+
+  // Also verify with GURL overload.
+  scrub_tab_behavior = ExtensionTabUtil::GetScrubTabBehavior(
+      extension.get(), mojom::ContextType::kPrivilegedExtension, options_url);
+  EXPECT_EQ(ExtensionTabUtil::kDontScrubTab, scrub_tab_behavior.committed_info);
+  EXPECT_EQ(ExtensionTabUtil::kDontScrubTab, scrub_tab_behavior.pending_info);
 }
 
 TEST_F(ChromeExtensionNavigationTest,
@@ -200,7 +362,8 @@ TEST_F(ChromeExtensionNavigationTest,
       })",
       extension_id.c_str());
 
-  std::optional<base::Value> settings = base::JSONReader::Read(json);
+  std::optional<base::Value> settings =
+      base::JSONReader::Read(json, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
   testing_pref_service()->SetManagedPref(
       pref_names::kExtensionManagement,
       base::Value::ToUniquePtrValue(std::move(settings.value())));
@@ -237,23 +400,6 @@ TEST_F(ChromeExtensionNavigationTest, PrepareURLForNavigationOnDevtools) {
     EXPECT_THAT(
         url, base::test::ErrorIs(ExtensionTabUtil::kCannotNavigateToDevtools));
   }
-  // Having the devtools permissions should allow access.
-  {
-    auto devtools_extension = ExtensionBuilder("devtools")
-                                  .SetManifestKey("devtools_page", "foo.html")
-                                  .Build();
-    auto url = ExtensionTabUtil::PrepareURLForNavigation(
-        kDevtoolsURL, devtools_extension.get(), browser_context());
-    EXPECT_THAT(url, base::test::ValueIs(kDevtoolsURL));
-  }
-  // Having the debugger permissions should also allow access.
-  {
-    auto debugger_extension =
-        ExtensionBuilder("debugger").AddAPIPermission("debugger").Build();
-    auto url = ExtensionTabUtil::PrepareURLForNavigation(
-        kDevtoolsURL, debugger_extension.get(), browser_context());
-    EXPECT_THAT(url, base::test::ValueIs(kDevtoolsURL));
-  }
 }
 
 TEST_F(ChromeExtensionNavigationTest,
@@ -264,6 +410,50 @@ TEST_F(ChromeExtensionNavigationTest,
       kChromeUntrustedURL, extension.get(), browser_context());
   EXPECT_THAT(url, base::test::ErrorIs(
                        ExtensionTabUtil::kCannotNavigateToChromeUntrusted));
+}
+
+TEST_F(ChromeExtensionNavigationTest, PrepareURLForNavigationOnFeedback) {
+  const std::string kFeedbackURL("chrome://feedback/");
+  auto extension = ExtensionBuilder("test").Build();
+  auto url = ExtensionTabUtil::PrepareURLForNavigation(
+      kFeedbackURL, extension.get(), browser_context());
+  EXPECT_THAT(url, base::test::ErrorIs(
+                       ExtensionTabUtil::kCannotNavigateToInternalPage));
+
+  // Non-extension contexts (e.g. WebUI) should be allowed to navigate to
+  // feedback.
+  auto non_extension_url = ExtensionTabUtil::PrepareURLForNavigation(
+      kFeedbackURL, /*extension=*/nullptr, browser_context());
+  ASSERT_TRUE(non_extension_url.has_value());
+  EXPECT_EQ(GURL(kFeedbackURL), *non_extension_url);
+
+#if BUILDFLAG(IS_CHROMEOS)
+  // Repeat the test for the chromeos-specific URL.
+  url = ExtensionTabUtil::PrepareURLForNavigation(
+      ash::kChromeUIOSFeedbackUrl, extension.get(), browser_context());
+  EXPECT_THAT(url, base::test::ErrorIs(
+                       ExtensionTabUtil::kCannotNavigateToInternalPage));
+
+  non_extension_url = ExtensionTabUtil::PrepareURLForNavigation(
+      ash::kChromeUIOSFeedbackUrl, /*extension=*/nullptr, browser_context());
+  ASSERT_TRUE(non_extension_url.has_value());
+  EXPECT_EQ(GURL(ash::kChromeUIOSFeedbackUrl), *non_extension_url);
+#endif
+}
+
+// Verifies that ExtensionTabUtil::OpenOptionsPageFromWebContents returns false
+// when invoked from a standalone WebContents without a BrowserWindowInterface.
+TEST_F(ChromeExtensionNavigationTest,
+       OpenOptionsPageFromWebContents_StandaloneWebContents) {
+  auto extension = ExtensionBuilder("options_ext")
+                       .SetManifestKey("options_page", "options.html")
+                       .Build();
+  ASSERT_TRUE(OptionsPageInfo::HasOptionsPage(extension.get()));
+  std::unique_ptr<content::WebContents> web_contents(
+      content::WebContentsTester::CreateTestWebContents(profile(), nullptr));
+
+  EXPECT_FALSE(ExtensionTabUtil::OpenOptionsPageFromWebContents(
+      extension.get(), web_contents.get()));
 }
 
 }  // namespace extensions

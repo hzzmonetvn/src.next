@@ -14,10 +14,6 @@
 class ChromeDownloadManagerDelegate;
 class DownloadUIController;
 
-namespace content {
-class DownloadManager;
-}
-
 namespace extensions {
 class ExtensionDownloadsEventRouter;
 }
@@ -31,6 +27,34 @@ class DownloadCoreService : public KeyedService {
     kShutdown = 0,
     kProfileDeletion = 1,
   };
+
+  // Reasons that trigger initializing and loading DownloadHistory.
+  // These values are persisted to logs. Entries should not be renumbered and
+  // numeric values should never be reused.
+  // LINT.IfChange(DownloadHistoryLoadTrigger)
+  enum class DownloadHistoryLoadTrigger {
+    // Eagerly initialized during DownloadManager creation (when
+    // kDeferredDownloadHistoryLoading is disabled).
+    kDownloadManagerCreation = 0,
+    // Triggered when assigning a download ID to a new or in-progress download.
+    kNewOrInProgressDownload = 1,
+    // Triggered when opening the chrome://downloads WebUI page.
+    kDownloadsPage = 2,
+    // Triggered by DownloadOfflineContentProvider (e.g. Android Download Home).
+    kOfflineContentProvider = 3,
+    // Triggered by the Desktop Download Bubble.
+    kDownloadBubble = 4,
+    // Triggered by the chrome.downloads extension API.
+    kExtensionApi = 5,
+    // Triggered when clearing download history via BrowsingDataRemover.
+    kBrowsingDataRemover = 6,
+    // Triggered when counting downloads in Clear Browsing Data dialog.
+    kBrowsingDataCounter = 7,
+    // Triggered by tests.
+    kTest = 8,
+    kMaxValue = kTest,
+  };
+  // LINT.ThenChange(//tools/metrics/histograms/metadata/download/enums.xml:DownloadHistoryLoadTrigger)
 
   DownloadCoreService();
 
@@ -50,7 +74,13 @@ class DownloadCoreService : public KeyedService {
   // no HistoryService for profile. Virtual for testing.
   virtual DownloadHistory* GetDownloadHistory() = 0;
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+  // Initialize the history system.
+  void InitializeHistory() {
+    InitializeHistory(DownloadHistoryLoadTrigger::kTest);
+  }
+  virtual void InitializeHistory(DownloadHistoryLoadTrigger trigger) {}
+
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
   virtual extensions::ExtensionDownloadsEventRouter*
   GetExtensionEventRouter() = 0;
 #endif
@@ -86,6 +116,12 @@ class DownloadCoreService : public KeyedService {
   // Returns false if at least one extension has disabled the UI, true
   // otherwise.
   virtual bool IsDownloadUiEnabled() = 0;
+
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+  // Simulates an extension using chrome.download.setUiOptions() to enable or
+  // disable the downloads UI.
+  virtual void SetDownloadUiEnabledForTest(bool enabled) {}
+#endif
 };
 
 #endif  // CHROME_BROWSER_DOWNLOAD_DOWNLOAD_CORE_SERVICE_H_

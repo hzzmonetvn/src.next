@@ -4,6 +4,8 @@
 
 #include "chrome/browser/extensions/external_registry_loader_win.h"
 
+#include <windows.h>
+
 #include <memory>
 #include <utility>
 
@@ -12,6 +14,7 @@
 #include "base/files/scoped_file.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
+#include "base/logging.h"
 #include "base/metrics/histogram_macros.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
@@ -68,17 +71,17 @@ namespace extensions {
 ExternalRegistryLoader::ExternalRegistryLoader()
     : attempted_watching_registry_(false) {}
 
-ExternalRegistryLoader::~ExternalRegistryLoader() {}
+ExternalRegistryLoader::~ExternalRegistryLoader() = default;
 
 void ExternalRegistryLoader::StartLoading() {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M161);
   GetOrCreateTaskRunner()->PostTask(
       FROM_HERE,
       base::BindOnce(&ExternalRegistryLoader::LoadOnBlockingThread, this));
 }
 
-base::Value::Dict ExternalRegistryLoader::LoadPrefsOnBlockingThread() {
-  base::Value::Dict prefs;
+base::DictValue ExternalRegistryLoader::LoadPrefsOnBlockingThread() {
+  base::DictValue prefs;
 
   // A map of IDs, to weed out duplicates between HKCU and HKLM.
   std::set<std::wstring> keys;
@@ -198,10 +201,10 @@ base::Value::Dict ExternalRegistryLoader::LoadPrefsOnBlockingThread() {
 }
 
 void ExternalRegistryLoader::LoadOnBlockingThread() {
-  DCHECK(task_runner_);
-  DCHECK(task_runner_->RunsTasksInCurrentSequence());
+  CHECK(task_runner_, base::NotFatalUntil::M161);
+  CHECK(task_runner_->RunsTasksInCurrentSequence(), base::NotFatalUntil::M161);
   base::TimeTicks start_time = base::TimeTicks::Now();
-  base::Value::Dict prefs = LoadPrefsOnBlockingThread();
+  base::DictValue prefs = LoadPrefsOnBlockingThread();
   LOCAL_HISTOGRAM_TIMES("Extensions.ExternalRegistryLoaderWin",
                         base::TimeTicks::Now() - start_time);
   content::GetUIThreadTaskRunner({})->PostTask(
@@ -212,8 +215,8 @@ void ExternalRegistryLoader::LoadOnBlockingThread() {
 }
 
 void ExternalRegistryLoader::CompleteLoadAndStartWatchingRegistry(
-    base::Value::Dict prefs) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+    base::DictValue prefs) {
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M161);
   LoadFinished(std::move(prefs));
 
   // Attempt to watch registry if we haven't already.
@@ -229,7 +232,8 @@ void ExternalRegistryLoader::CompleteLoadAndStartWatchingRegistry(
                        base::Unretained(this), base::Unretained(&hklm_key_));
     hklm_key_.StartWatching(std::move(callback));
   } else {
-    LOG(WARNING) << "Error observing HKLM: " << result;
+    ::SetLastError(result);
+    PLOG(WARNING) << "Error observing HKLM";
   }
 
   if ((result = hkcu_key_.Create(HKEY_CURRENT_USER, kRegistryExtensions,
@@ -239,7 +243,8 @@ void ExternalRegistryLoader::CompleteLoadAndStartWatchingRegistry(
                        base::Unretained(this), base::Unretained(&hkcu_key_));
     hkcu_key_.StartWatching(std::move(callback));
   } else {
-    LOG(WARNING) << "Error observing HKCU: " << result;
+    ::SetLastError(result);
+    PLOG(WARNING) << "Error observing HKCU";
   }
 
   attempted_watching_registry_ = true;
@@ -254,7 +259,7 @@ void ExternalRegistryLoader::OnRegistryKeyChanged(base::win::RegKey* key) {
 
   GetOrCreateTaskRunner()->PostTask(
       FROM_HERE,
-      base::BindOnce(&ExternalRegistryLoader::UpatePrefsOnBlockingThread,
+      base::BindOnce(&ExternalRegistryLoader::UpdatePrefsOnBlockingThread,
                      this));
 }
 
@@ -272,11 +277,11 @@ ExternalRegistryLoader::GetOrCreateTaskRunner() {
   return task_runner_;
 }
 
-void ExternalRegistryLoader::UpatePrefsOnBlockingThread() {
-  DCHECK(task_runner_);
-  DCHECK(task_runner_->RunsTasksInCurrentSequence());
+void ExternalRegistryLoader::UpdatePrefsOnBlockingThread() {
+  CHECK(task_runner_, base::NotFatalUntil::M161);
+  CHECK(task_runner_->RunsTasksInCurrentSequence(), base::NotFatalUntil::M161);
   base::TimeTicks start_time = base::TimeTicks::Now();
-  base::Value::Dict prefs = LoadPrefsOnBlockingThread();
+  base::DictValue prefs = LoadPrefsOnBlockingThread();
   LOCAL_HISTOGRAM_TIMES("Extensions.ExternalRegistryLoaderWinUpdate",
                         base::TimeTicks::Now() - start_time);
   content::GetUIThreadTaskRunner({})->PostTask(

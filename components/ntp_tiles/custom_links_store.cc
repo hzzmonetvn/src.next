@@ -11,7 +11,8 @@
 #include <utility>
 
 #include "base/strings/utf_string_conversions.h"
-#include "components/ntp_tiles/pref_names.h"
+#include "components/ntp_tiles/custom_links_pref_names.h"
+#include "components/ntp_tiles/metrics.h"
 #include "components/pref_registry/pref_registry_syncable.h"
 #include "components/prefs/pref_service.h"
 
@@ -25,17 +26,23 @@ const char* kDictionaryKeyIsMostVisited = "isMostVisited";
 
 }  // namespace
 
-CustomLinksStore::CustomLinksStore(PrefService* prefs) : prefs_(prefs) {
+CustomLinksStore::CustomLinksStore(PrefService* prefs, CustomLinksScope scope)
+    : custom_links_list_pref_(scope == CustomLinksScope::kDesktop
+                                  ? prefs::kCustomLinksList
+                                  : prefs::kCustomLinksListMobile),
+      prefs_(prefs) {
   DCHECK(prefs);
 }
 
 CustomLinksStore::~CustomLinksStore() = default;
 
 std::vector<CustomLinksManager::Link> CustomLinksStore::RetrieveLinks() {
+  static bool has_recorded_first_load_stats = false;
+
   std::vector<CustomLinksManager::Link> links;
 
-  const base::Value::List& stored_links =
-      prefs_->GetList(prefs::kCustomLinksList);
+  const base::ListValue& stored_links =
+      prefs_->GetList(custom_links_list_pref_);
 
   for (const base::Value& link : stored_links) {
     const std::string* url_string =
@@ -57,30 +64,39 @@ std::vector<CustomLinksManager::Link> CustomLinksStore::RetrieveLinks() {
     links.emplace_back(CustomLinksManager::Link{
         std::move(url), base::UTF8ToUTF16(*title_string), is_most_visited});
   }
+
+  if (!has_recorded_first_load_stats) {
+    has_recorded_first_load_stats = true;
+    ntp_tiles::metrics::RecordNumberOfCustomTilesOnFirstNtp(
+        static_cast<int>(links.size()));
+  }
+
   return links;
 }
 
 void CustomLinksStore::StoreLinks(
     const std::vector<CustomLinksManager::Link>& links) {
-  base::Value::List new_link_list;
+  base::ListValue new_link_list;
   for (const CustomLinksManager::Link& link : links) {
-    base::Value::Dict new_link;
+    base::DictValue new_link;
     new_link.Set(kDictionaryKeyUrl, link.url.spec());
     new_link.Set(kDictionaryKeyTitle, link.title);
     new_link.Set(kDictionaryKeyIsMostVisited, link.is_most_visited);
     new_link_list.Append(std::move(new_link));
   }
-  prefs_->SetList(prefs::kCustomLinksList, std::move(new_link_list));
+  prefs_->SetList(custom_links_list_pref_, std::move(new_link_list));
 }
 
 void CustomLinksStore::ClearLinks() {
-  prefs_->ClearPref(prefs::kCustomLinksList);
+  prefs_->ClearPref(custom_links_list_pref_);
 }
 
 // static
 void CustomLinksStore::RegisterProfilePrefs(
     user_prefs::PrefRegistrySyncable* user_prefs) {
   user_prefs->RegisterListPref(prefs::kCustomLinksList,
+                               user_prefs::PrefRegistrySyncable::SYNCABLE_PREF);
+  user_prefs->RegisterListPref(prefs::kCustomLinksListMobile,
                                user_prefs::PrefRegistrySyncable::SYNCABLE_PREF);
 }
 

@@ -13,9 +13,9 @@
 #include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
 #include "chrome/browser/extensions/extension_install_prompt.h"
-#include "chrome/browser/extensions/load_error_reporter.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/browser/extension_registry_observer.h"
+#include "extensions/browser/load_error_reporter.h"
 #include "extensions/browser/supervised_user_extensions_delegate.h"
 #include "extensions/common/extension_id.h"
 
@@ -60,7 +60,7 @@ class ExtensionEnableFlow : public extensions::LoadErrorReporter::Observer,
   // LoadErrorReporter::Observer:
   void OnLoadFailure(content::BrowserContext* browser_context,
                      const base::FilePath& file_path,
-                     const std::string& error) override;
+                     const std::u16string& error) override;
 
  private:
   // Runs the enable flow. It starts by checking if the extension is loaded.
@@ -69,19 +69,20 @@ class ExtensionEnableFlow : public extensions::LoadErrorReporter::Observer,
   // CheckPermissionAndMaybePromptUser finish the flow.
   void Run();
 
-  // Checks if there is permission escalation while the extension is
-  // disabled/terminated. If no, enables the extension and notify |delegate_|
-  // synchronously. Otherwise, creates an ExtensionInstallPrompt and asks user
-  // to confirm.
+  // Checks if the extension can be re-enabled and whether user confirmation is
+  // needed. If privileges weren't escalated and the extension only has
+  // supported disable reasons, enables the extension and notifies |delegate_|
+  // synchronously. If permissions need to be confirmed, creates an
+  // ExtensionInstallPrompt and asks user to confirm. If other disable reasons
+  // are present, aborts the flow.
   void CheckPermissionAndMaybePromptUser();
 
-  // Creates an ExtensionInstallPrompt in |prompt_|.
-  void CreatePrompt();
+  // Creates an ExtensionInstallPrompt in |prompt_| with the given prompt data.
+  void CreatePrompt(std::unique_ptr<extensions::InstallPromptData> prompt);
 
   // Called when the extension approval flow is complete.
   void OnExtensionApprovalDone(
-      extensions::SupervisedUserExtensionsDelegate::ExtensionApprovalResult
-          result);
+      extensions::SupervisedExtensionApprovalResult result);
 
   // Starts/stops observing extension load notifications.
   void StartObserving();

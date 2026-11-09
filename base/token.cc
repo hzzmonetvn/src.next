@@ -31,6 +31,10 @@ Token Token::CreateRandom() {
   return token;
 }
 
+span<const uint8_t, 16> Token::AsBytes() const {
+  return as_byte_span(words_);
+}
+
 std::string Token::ToString() const {
   return StringPrintf("%016" PRIX64 "%016" PRIX64, words_[0], words_[1]);
 }
@@ -67,17 +71,20 @@ void WriteTokenToPickle(Pickle* pickle, const Token& token) {
 
 std::optional<Token> ReadTokenFromPickle(PickleIterator* pickle_iterator) {
   uint64_t high;
-  if (!pickle_iterator->ReadUInt64(&high))
+  if (!pickle_iterator->ReadUInt64(&high)) {
     return std::nullopt;
+  }
 
   uint64_t low;
-  if (!pickle_iterator->ReadUInt64(&low))
+  if (!pickle_iterator->ReadUInt64(&low)) {
     return std::nullopt;
+  }
 
   return Token(high, low);
 }
 
-size_t TokenHash::operator()(const Token& token) const {
+// static
+size_t TokenHash::operator()(const Token& token) {
   return HashInts64(token.high(), token.low());
 }
 

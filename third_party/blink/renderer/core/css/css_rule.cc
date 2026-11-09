@@ -21,6 +21,8 @@
 
 #include "third_party/blink/renderer/core/css/css_rule.h"
 
+#include "third_party/blink/renderer/core/css/css_grouping_rule.h"
+#include "third_party/blink/renderer/core/css/css_style_rule.h"
 #include "third_party/blink/renderer/core/css/css_style_sheet.h"
 #include "third_party/blink/renderer/core/css/style_rule.h"
 #include "third_party/blink/renderer/core/css/style_sheet_contents.h"
@@ -58,6 +60,27 @@ void CSSRule::CountUse(WebFeature feature) const {
   }
 }
 
+wtf_size_t CSSRule::ReplaceChildRuleInParentIfExists(StyleRuleBase* old_rule,
+                                                     StyleRuleBase* new_rule,
+                                                     wtf_size_t position_hint) {
+  CSSRule* parent_rule = parentRule();
+  if (auto* style_rule = DynamicTo<CSSStyleRule>(parent_rule)) {
+    return style_rule->GetStyleRule()->ReplaceChildRuleIfExists(
+        old_rule, new_rule, position_hint);
+  }
+  if (auto* grouping_rule = DynamicTo<CSSGroupingRule>(parent_rule)) {
+    return grouping_rule->GroupRule()->ReplaceChildRuleIfExists(
+        old_rule, new_rule, position_hint);
+  }
+  if (CSSStyleSheet* parent_stylesheet = parentStyleSheet()) {
+    StyleSheetContents* contents = parent_stylesheet->Contents();
+    CHECK(contents);
+    return contents->ReplaceChildRuleIfExists(old_rule, new_rule,
+                                              position_hint);
+  }
+  return std::numeric_limits<wtf_size_t>::max();  // Not found.
+}
+
 void CSSRule::SetParentStyleSheet(CSSStyleSheet* style_sheet) {
   parent_is_rule_ = false;
   parent_ = style_sheet;
@@ -71,15 +94,6 @@ void CSSRule::SetParentRule(CSSRule* rule) {
 void CSSRule::Trace(Visitor* visitor) const {
   visitor->Trace(parent_);
   ScriptWrappable::Trace(visitor);
-}
-
-bool CSSRule::VerifyParentIsCSSRule() const {
-  return !parent_ || parent_->GetWrapperTypeInfo()->IsSubclass(
-                         CSSRule::GetStaticWrapperTypeInfo());
-}
-bool CSSRule::VerifyParentIsCSSStyleSheet() const {
-  return !parent_ || parent_->GetWrapperTypeInfo()->IsSubclass(
-                         CSSStyleSheet::GetStaticWrapperTypeInfo());
 }
 
 }  // namespace blink

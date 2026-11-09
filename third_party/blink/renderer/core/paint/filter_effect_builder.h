@@ -56,12 +56,15 @@ class CORE_EXPORT FilterEffectBuilder final {
 
   Filter* BuildReferenceFilter(const ReferenceFilterOperation&,
                                FilterEffect* previous_effect,
-                               SVGFilterGraphNodeMap* = nullptr) const;
+                               SVGFilterGraphNodeMap* = nullptr,
+                               bool input_tainted = false,
+                               bool input_contains_backdrop = false) const;
 
   FilterEffect* BuildFilterEffect(const FilterOperations&,
                                   bool input_tainted = false) const;
   CompositorFilterOperations BuildFilterOperations(
-      const FilterOperations&) const;
+      const FilterOperations&,
+      bool contains_backdrop = false) const;
 
   void SetShorthandScale(float shorthand_scale) {
     shorthand_scale_ = shorthand_scale;

@@ -7,11 +7,13 @@
 
 #include <stdint.h>
 
+#include "base/memory/raw_ptr.h"
 #include "base/timer/timer.h"
 #include "cc/layers/content_layer_client.h"
 #include "cc/layers/surface_layer.h"
 #include "components/viz/common/surfaces/surface_id.h"
 #include "third_party/blink/renderer/core/core_export.h"
+#include "third_party/blink/renderer/platform/heap/safe_non_retaining_persistent.h"
 
 namespace cc {
 class PictureLayer;
@@ -30,12 +32,9 @@ class CORE_EXPORT ChildFrameCompositingHelper : public cc::ContentLayerClient {
       delete;
   ~ChildFrameCompositingHelper() override;
 
-  enum class CaptureSequenceNumberChanged { kYes, kNo };
   enum class AllowPaintHolding { kYes, kNo };
-  void SetSurfaceId(
-      const viz::SurfaceId& surface_id,
-      CaptureSequenceNumberChanged capture_sequence_number_changed,
-      AllowPaintHolding allow_paint_holding);
+  void SetSurfaceId(const viz::SurfaceId& surface_id,
+                    AllowPaintHolding allow_paint_holding);
   void UpdateVisibility(bool visible);
   void ChildFrameGone(float device_scale_factor);
 
@@ -51,7 +50,13 @@ class CORE_EXPORT ChildFrameCompositingHelper : public cc::ContentLayerClient {
                               AllowPaintHolding allow_paint_holding);
   void PaintHoldingTimerFired();
 
-  ChildFrameCompositor* const child_frame_compositor_;
+  // The `ChildFrameCompositor` object owns this `ChildFrameCompositingHelper`.
+  // `child_frame_compositor_` should never be null. We can't use a strong
+  // `Persistent` here because that would create a cycle between the GCed
+  // `ChildFrameCompositor` and non-GCed `ChildFrameCompositingHelper` that
+  // would leak both objects.
+  const SafeNonRetainingPersistent<ChildFrameCompositor>
+      child_frame_compositor_;
   viz::SurfaceId surface_id_;
   scoped_refptr<cc::SurfaceLayer> surface_layer_;
   scoped_refptr<cc::PictureLayer> crash_ui_layer_;

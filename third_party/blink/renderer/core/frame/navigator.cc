@@ -23,44 +23,23 @@
 
 #include "third_party/blink/renderer/core/frame/navigator.h"
 
-#include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_controller.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/execution_context/navigator_base.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/frame/settings.h"
+#include "third_party/blink/renderer/core/inspector/console_message.h"
 #include "third_party/blink/renderer/core/loader/frame_loader.h"
-#include "third_party/blink/renderer/core/page/chrome_client.h"
 #include "third_party/blink/renderer/core/page/page.h"
 #include "third_party/blink/renderer/core/probe/core_probes.h"
-#include "third_party/blink/renderer/platform/instrumentation/memory_pressure_listener.h"
 #include "third_party/blink/renderer/platform/language.h"
 
 namespace blink {
 
 Navigator::Navigator(ExecutionContext* context) : NavigatorBase(context) {}
 
-String Navigator::productSub() const {
-  return "20030107";
-}
-
-String Navigator::vendor() const {
-  // Do not change without good cause. History:
-  // https://code.google.com/p/chromium/issues/detail?id=276813
-  // https://www.w3.org/Bugs/Public/show_bug.cgi?id=27786
-  // https://groups.google.com/a/chromium.org/forum/#!topic/blink-dev/QrgyulnqvmE
-  return "Google Inc.";
-}
-
-String Navigator::vendorSub() const {
-  return "";
-}
-
 String Navigator::platform() const {
-  // TODO(955620): Consider changing devtools overrides to only allow overriding
-  // the platform with a frozen platform to distinguish between
-  // mobile and desktop when ReduceUserAgent is enabled.
   if (!DomWindow())
     return NavigatorBase::platform();
   const String& platform_override =
@@ -78,7 +57,25 @@ bool Navigator::cookieEnabled() const {
   }
 
   Settings* settings = DomWindow()->GetFrame()->GetSettings();
-  return settings && settings->GetCookieEnabled();
+  bool cookie_enabled = settings && settings->GetCookieEnabled();
+
+#if !BUILDFLAG(IS_ANDROID)
+  // We don't want to print this message for WebView, and the utility is much
+  // lower for all Android platforms anyway, so it seems reasonable to skip.
+  if (cookie_enabled && DomWindow()->Url().IsLocalFile()) {
+    DomWindow()->AddConsoleMessage(
+        MakeGarbageCollected<ConsoleMessage>(
+            mojom::blink::ConsoleMessageSource::kJavaScript,
+            mojom::blink::ConsoleMessageLevel::kWarning,
+            "While navigator.cookieEnabled does return true for this file:// "
+            "URL, this is done for web compatability reasons. Cookies will not "
+            "actually be stored for file:// URLs. If you want this to change "
+            "please leave feedback on crbug.com/378604901."),
+        /*discard_duplicates=*/true);
+  }
+#endif
+
+  return cookie_enabled;
 }
 
 bool Navigator::webdriver() const {
@@ -94,11 +91,7 @@ String Navigator::GetAcceptLanguages() {
   if (!DomWindow())
     return DefaultLanguage();
 
-  return DomWindow()
-      ->GetFrame()
-      ->GetPage()
-      ->GetChromeClient()
-      .AcceptLanguages();
+  return DomWindow()->GetFrame()->GetPage()->GetSettings().GetAcceptLanguages();
 }
 
 void Navigator::Trace(Visitor* visitor) const {

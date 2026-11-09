@@ -4,10 +4,15 @@
 
 package org.chromium.chrome.browser.tasks.tab_management;
 
+import org.chromium.base.Token;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.chrome.browser.tasks.tab_management.labels.TabCardLabelData;
+
 import java.util.Map;
 import java.util.Set;
 
 /** Interface for the notification handler for tab notifications components. */
+@NullMarked
 public interface TabListNotificationHandler {
     /**
      * Update the notification bubble indicating a new status for all tab strip items.
@@ -24,4 +29,12 @@ public interface TabListNotificationHandler {
      *     to reset.
      */
     void updateTabCardLabels(Map<Integer, TabCardLabelData> labelData);
+
+    /**
+     * Update the {@link TabCardLabelData} for tab groups in the tab list.
+     *
+     * @param labelData A map of tab group IDs to {@link TabCardLabelData} to update. Can use a null
+     *     value to reset.
+     */
+    void updateTabGroupCardLabels(Map<Token, TabCardLabelData> labelData);
 }

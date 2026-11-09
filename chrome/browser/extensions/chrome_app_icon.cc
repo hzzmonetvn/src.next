@@ -11,6 +11,7 @@
 #include "chrome/browser/extensions/extension_util.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/browser/extension_util.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/manifest_handlers/icons_handler.h"
 #include "ui/gfx/canvas.h"
 #include "ui/gfx/geometry/rect.h"
@@ -20,6 +21,8 @@
 #if BUILDFLAG(IS_CHROMEOS)
 #include "chrome/browser/ash/extensions/gfx_utils.h"
 #endif
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -36,7 +39,7 @@ class RoundedCornersImageSource : public gfx::CanvasImageSource {
   RoundedCornersImageSource& operator=(const RoundedCornersImageSource&) =
       delete;
 
-  ~RoundedCornersImageSource() override {}
+  ~RoundedCornersImageSource() override = default;
 
  private:
   // gfx::CanvasImageSource overrides:
@@ -110,10 +113,10 @@ ChromeAppIcon::ChromeAppIcon(ChromeAppIconDelegate* delegate,
       app_id_(app_id),
       resource_size_in_dip_(resource_size_in_dip),
       resize_function_(resize_function) {
-  DCHECK(delegate_);
-  DCHECK(browser_context_);
-  DCHECK(!destroyed_callback_.is_null());
-  DCHECK_GE(resource_size_in_dip, 0);
+  CHECK(delegate_, base::NotFatalUntil::M161);
+  CHECK(browser_context_, base::NotFatalUntil::M161);
+  CHECK(!destroyed_callback_.is_null(), base::NotFatalUntil::M161);
+  CHECK_GE(resource_size_in_dip, 0, base::NotFatalUntil::M161);
   Reload();
 }
 
@@ -139,22 +142,21 @@ void ChromeAppIcon::Reload() {
 }
 
 bool ChromeAppIcon::IsValid() const {
-  DCHECK(icon_);
+  CHECK(icon_, base::NotFatalUntil::M161);
   return icon_->is_valid();
 }
 
 void ChromeAppIcon::UpdateIcon() {
-  DCHECK(icon_);
+  CHECK(icon_, base::NotFatalUntil::M161);
 
   image_skia_ = icon_->image_skia();
 
   Badge badge_type = Badge::kNone;
   bool app_launchable = util::IsAppLaunchable(app_id_, browser_context_);
 #if BUILDFLAG(IS_CHROMEOS)
-  has_chrome_badge_ = util::ShouldApplyChromeBadge(browser_context_, app_id_);
   if (!app_launchable) {
     badge_type = Badge::kBlocked;
-  } else if (has_chrome_badge_) {
+  } else if (util::ShouldApplyChromeBadge(browser_context_, app_id_)) {
     badge_type = Badge::kChrome;
   }
 #endif
@@ -166,7 +168,7 @@ void ChromeAppIcon::UpdateIcon() {
 }
 
 void ChromeAppIcon::OnExtensionIconImageChanged(IconImage* icon) {
-  DCHECK_EQ(icon_.get(), icon);
+  CHECK_EQ(icon_.get(), icon, base::NotFatalUntil::M161);
   UpdateIcon();
 }
 

@@ -28,7 +28,6 @@
 #include "chrome/browser/platform_util_internal.h"
 #include "content/public/browser/browser_thread.h"
 #include "ui/base/win/shell.h"
-#include "ui/gfx/native_widget_types.h"
 #include "url/gurl.h"
 
 using content::BrowserThread;
@@ -89,22 +88,16 @@ void ShowItemInFolderOnWorkerThread(const base::FilePath& full_path) {
 void OpenExternalOnWorkerThread(const GURL& url) {
   base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
                                                 base::BlockingType::MAY_BLOCK);
+  if (!platform_util::internal::AreShellOperationsAllowed()) {
+    return;
+  }
+
   // Quote the input scheme to be sure that the command does not have
   // parameters unexpected by the external program. This url should already
   // have been escaped.
   std::string escaped_url = url.spec();
   escaped_url.insert(0, "\"");
   escaped_url += "\"";
-
-  // According to Mozilla in uriloader/exthandler/win/nsOSHelperAppService.cpp:
-  // "Some versions of windows (Win2k before SP3, Win XP before SP1) crash in
-  // ShellExecute on long URLs (bug 161357 on bugzilla.mozilla.org). IE 5 and 6
-  // support URLS of 2083 chars in length, 2K is safe."
-  //
-  // It may be possible to increase this. https://crbug.com/727909
-  const size_t kMaxUrlLength = 2048;
-  if (escaped_url.length() > kMaxUrlLength)
-    return;
 
   // Specify %windir%\system32 as the CWD so that any new proc spawned does not
   // inherit this proc's CWD. Without this, uninstalls may be broken by a
@@ -120,7 +113,7 @@ void OpenExternalOnWorkerThread(const GURL& url) {
           NULL, "open", escaped_url.c_str(), NULL,
           system_dir.AsUTF8Unsafe().c_str(), SW_SHOWNORMAL)) <= 32) {
     // On failure, it may be good to display a message to the user.
-    // https://crbug.com/727913
+    // https://crbug.com/40523302
     return;
   }
 }
@@ -129,7 +122,8 @@ void OpenExternalOnWorkerThread(const GURL& url) {
 
 void ShowItemInFolder(Profile* profile, const base::FilePath& full_path) {
   base::ThreadPool::CreateCOMSTATaskRunner(
-      {base::MayBlock(), base::TaskPriority::USER_BLOCKING})
+      {base::MayBlock(), base::TaskPriority::USER_BLOCKING,
+       base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN})
       ->PostTask(FROM_HERE,
                  base::BindOnce(&ShowItemInFolderOnWorkerThread, full_path));
 }
@@ -157,7 +151,8 @@ void OpenExternal(const GURL& url) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
 
   base::ThreadPool::CreateCOMSTATaskRunner(
-      {base::MayBlock(), base::TaskPriority::USER_BLOCKING})
+      {base::MayBlock(), base::TaskPriority::USER_BLOCKING,
+       base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN})
       ->PostTask(FROM_HERE, base::BindOnce(&OpenExternalOnWorkerThread, url));
 }
 

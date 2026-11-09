@@ -35,6 +35,7 @@
 
 #include "base/notreached.h"
 #include "base/task/single_thread_task_runner.h"
+#include "third_party/blink/public/mojom/scroll/scroll_enums.mojom-blink.h"
 #include "third_party/blink/public/mojom/scroll/scroll_into_view_params.mojom-blink-forward.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/dom/document.h"
@@ -115,14 +116,17 @@ class CORE_EXPORT VisualViewport : public GarbageCollected<VisualViewport>,
   void InitializeScrollbars();
 
   // Sets the location of the visual viewport relative to the outer viewport.
-  // The coordinates are in partial CSS pixels.
-  void SetLocation(const gfx::PointF&);
+  // The coordinates are in partial CSS pixels. Defaults to a programmatic
+  // scroll.
+  void SetLocation(
+      const gfx::PointF&,
+      mojom::blink::ScrollType = mojom::blink::ScrollType::kProgrammatic);
   // FIXME: This should be called moveBy
   void Move(const ScrollOffset&);
 
   // The size of the Blink viewport area. See size_ for precise
   // definition.
-  void SetSize(const gfx::Size&);
+  void SetSize(const gfx::Size&, bool should_suppress_resize_event = false);
   gfx::Size Size() const { return size_; }
 
   // The area of the layout viewport rect visible in the visual viewport,
@@ -139,9 +143,12 @@ class CORE_EXPORT VisualViewport : public GarbageCollected<VisualViewport>,
   void MainFrameDidChangeSize();
 
   // Sets scale and location in one operation, preventing intermediate clamping.
-  void SetScaleAndLocation(float scale,
-                           bool is_pinch_gesture_active,
-                           const gfx::PointF& location);
+  // Defaults to a programmatic scroll.
+  void SetScaleAndLocation(
+      float scale,
+      bool is_pinch_gesture_active,
+      const gfx::PointF& location,
+      mojom::blink::ScrollType = mojom::blink::ScrollType::kProgrammatic);
 
   void SetScale(float);
   float Scale() const { return scale_; }
@@ -188,19 +195,11 @@ class CORE_EXPORT VisualViewport : public GarbageCollected<VisualViewport>,
 
   // ScrollableArea implementation
   ChromeClient* GetChromeClient() const override;
-  SmoothScrollSequencer* GetSmoothScrollSequencer() const override;
-  bool SetScrollOffset(const ScrollOffset&,
-                       mojom::blink::ScrollType,
-                       mojom::blink::ScrollBehavior,
-                       ScrollCallback on_finish) override;
-  bool SetScrollOffset(const ScrollOffset&,
-                       mojom::blink::ScrollType,
-                       mojom::blink::ScrollBehavior =
-                           mojom::blink::ScrollBehavior::kInstant) override;
   PhysicalRect ScrollIntoView(
       const PhysicalRect&,
       const PhysicalBoxStrut& scroll_margin,
-      const mojom::blink::ScrollIntoViewParamsPtr&) override;
+      const mojom::blink::ScrollIntoViewParamsPtr&,
+      std::unique_ptr<ScrollPromiseResolver::ActiveScrollTracker>) override;
   bool IsThrottled() const override {
     // VisualViewport is always in the main frame, so the frame does not get
     // throttled.
@@ -210,9 +209,6 @@ class CORE_EXPORT VisualViewport : public GarbageCollected<VisualViewport>,
   int ScrollSize(ScrollbarOrientation) const override;
   bool IsScrollCornerVisible() const override { return false; }
   gfx::Rect ScrollCornerRect() const override { return gfx::Rect(); }
-  gfx::Vector2d ScrollOffsetInt() const override {
-    return SnapScrollOffsetToPhysicalPixels(offset_);
-  }
   ScrollOffset GetScrollOffset() const override { return offset_; }
   gfx::Vector2d MinimumScrollOffsetInt() const override;
   gfx::Vector2d MaximumScrollOffsetInt() const override;
@@ -229,7 +225,8 @@ class CORE_EXPORT VisualViewport : public GarbageCollected<VisualViewport>,
   bool ScrollAnimatorEnabled() const override;
   void ScrollControlWasSetNeedsPaintInvalidation() override {}
   void UpdateScrollOffset(const ScrollOffset&,
-                          mojom::blink::ScrollType) override;
+                          mojom::blink::ScrollType,
+                          cc::ScrollSourceType) override;
   cc::Layer* LayerForScrolling() const;
   cc::Layer* LayerForHorizontalScrollbar() const override;
   cc::Layer* LayerForVerticalScrollbar() const override;
@@ -237,8 +234,7 @@ class CORE_EXPORT VisualViewport : public GarbageCollected<VisualViewport>,
   bool UsesCompositedScrolling() const override { return true; }
   cc::AnimationHost* GetCompositorAnimationHost() const override;
   cc::AnimationTimeline* GetCompositorAnimationTimeline() const override;
-  gfx::Rect VisibleContentRect(
-      IncludeScrollbarsInRect = kExcludeScrollbars) const override;
+  gfx::Rect VisibleContentRect(IncludeScrollbarsInRect) const override;
   scoped_refptr<base::SingleThreadTaskRunner> GetTimerTaskRunner()
       const override;
   mojom::blink::ColorScheme UsedColorSchemeScrollbars() const override;
@@ -250,7 +246,9 @@ class CORE_EXPORT VisualViewport : public GarbageCollected<VisualViewport>,
   // WebViewImpl explicitly rather than via
   // ScrollingCoordinator::DidCompositorScroll() since it needs to be set in
   // tandem with the page scale delta.
-  void DidCompositorScroll(const gfx::PointF&) final { NOTREACHED(); }
+  void DidCompositorScroll(const gfx::PointF&, cc::ScrollSourceType) final {
+    NOTREACHED();
+  }
 
   // Visual Viewport API implementation.
   double OffsetLeft() const;
@@ -316,20 +314,33 @@ class CORE_EXPORT VisualViewport : public GarbageCollected<VisualViewport>,
 
   void DropCompositorScrollDeltaNextCommit() override;
 
+ protected:
+  // ScrollableArea implementation
+  bool SetScrollOffsetInternal(
+      const ScrollOffset&,
+      mojom::blink::ScrollType,
+      cc::ScrollSourceType,
+      mojom::blink::ScrollBehavior,
+      bool targeted_scroll,
+      std::unique_ptr<ScrollPromiseResolver::ActiveScrollTracker>) override;
+
  private:
   bool DidSetScaleOrLocation(float scale,
                              bool is_pinch_gesture_active,
-                             const gfx::PointF& location);
+                             const gfx::PointF& location,
+                             mojom::blink::ScrollType);
 
   void CreateLayers();
 
   void EnqueueScrollEvent();
   void EnqueueResizeEvent();
 
+  class ScrollbarDelegate;
+
   EScrollbarWidth CSSScrollbarWidth() const;
   int ScrollbarThickness() const;
   void UpdateScrollbarLayer(ScrollbarOrientation);
-  void UpdateScrollbarColor(cc::SolidColorScrollbarLayer&);
+  SkColor4f ScrollbarThumbColor() const;
 
   void NotifyRootFrameViewport() const;
 
@@ -359,6 +370,8 @@ class CORE_EXPORT VisualViewport : public GarbageCollected<VisualViewport>,
   scoped_refptr<cc::Layer> scroll_layer_;
   scoped_refptr<cc::SolidColorScrollbarLayer> scrollbar_layer_horizontal_;
   scoped_refptr<cc::SolidColorScrollbarLayer> scrollbar_layer_vertical_;
+  scoped_refptr<ScrollbarDelegate> scrollbar_delegate_horizontal_;
+  scoped_refptr<ScrollbarDelegate> scrollbar_delegate_vertical_;
 
   TraceablePropertyTreeStateOrAlias parent_property_tree_state_{
       TraceablePropertyTreeStateOrAlias::kUninitialized};

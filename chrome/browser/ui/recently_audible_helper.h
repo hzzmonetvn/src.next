@@ -9,8 +9,9 @@
 #include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
+#include "components/tabs/public/tab_interface.h"
 #include "content/public/browser/web_contents_observer.h"
-#include "content/public/browser/web_contents_user_data.h"
+#include "ui/base/unowned_user_data/scoped_unowned_user_data.h"
 
 namespace base {
 class TickClock;
@@ -20,10 +21,10 @@ class TickClock;
 // is recently audible. This is used to make the "audio playing" icon persist
 // for a short period after audio stops. This class is only safe to use from the
 // UI thread.
-class RecentlyAudibleHelper
-    : public content::WebContentsObserver,
-      public content::WebContentsUserData<RecentlyAudibleHelper> {
+class RecentlyAudibleHelper : public content::WebContentsObserver {
  public:
+  DECLARE_USER_DATA(RecentlyAudibleHelper);
+
   // This corresponds to the amount of time that the "audio playing" icon will
   // persist in the tab strip after audio has stopped playing.
   static constexpr base::TimeDelta kRecentlyAudibleTimeout = base::Seconds(2);
@@ -32,10 +33,15 @@ class RecentlyAudibleHelper
       base::RepeatingCallbackList<void(bool was_recently_audible)>;
   using Callback = CallbackList::CallbackType;
 
+  RecentlyAudibleHelper(tabs::TabInterface& tab,
+                        content::WebContents* contents);
   RecentlyAudibleHelper(const RecentlyAudibleHelper&) = delete;
   RecentlyAudibleHelper& operator=(const RecentlyAudibleHelper&) = delete;
 
   ~RecentlyAudibleHelper() override;
+
+  static RecentlyAudibleHelper* From(tabs::TabInterface* tab);
+  static RecentlyAudibleHelper* FromWebContents(content::WebContents* contents);
 
   // Returns true if the WebContents was ever audible over its lifetime.
   bool WasEverAudible() const;
@@ -50,7 +56,7 @@ class RecentlyAudibleHelper
   // Registers the provided repeating callback for notifications. Destroying
   // the returned subscription will unregister the callback. This is safe to do
   // while in the context of the callback itself.
-  base::CallbackListSubscription RegisterCallbackForTesting(
+  base::CallbackListSubscription RegisterRecentlyAudibleChangedCallback(
       const Callback& callback);
 
   // Allows replacing the tick clock that is used by this class. Setting it back
@@ -65,11 +71,11 @@ class RecentlyAudibleHelper
   void SetRecentlyAudibleForTesting();
   void SetNotRecentlyAudibleForTesting();
 
+  // Simulates the recently audible timer firing.
+  void FireRecentlyAudibleTimerForTesting();
+
  private:
   friend class RecentlyAudibleHelperTest;
-  friend class content::WebContentsUserData<RecentlyAudibleHelper>;
-
-  explicit RecentlyAudibleHelper(content::WebContents* contents);
 
   // contents::WebContentsObserver implementation:
   void OnAudioStateChanged(bool audible) override;
@@ -96,7 +102,7 @@ class RecentlyAudibleHelper
   // The tick clock this object is using.
   raw_ptr<const base::TickClock> tick_clock_;
 
-  WEB_CONTENTS_USER_DATA_KEY_DECL();
+  ui::ScopedUnownedUserData<RecentlyAudibleHelper> scoped_unowned_user_data_;
 };
 
 #endif  // CHROME_BROWSER_UI_RECENTLY_AUDIBLE_HELPER_H_

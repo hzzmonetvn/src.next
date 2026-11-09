@@ -26,11 +26,17 @@
 #include "third_party/blink/renderer/core/css/css_image_set_value.h"
 
 #include <algorithm>
+#include <utility>
 
 #include "third_party/blink/renderer/core/css/css_image_set_option_value.h"
+#include "third_party/blink/renderer/core/css/css_length_resolver.h"
+#include "third_party/blink/renderer/core/css/css_value_list.h"
+#include "third_party/blink/renderer/core/css/resolver/style_resolver_state.h"
 #include "third_party/blink/renderer/core/loader/resource/image_resource_content.h"
 #include "third_party/blink/renderer/core/paint/timing/paint_timing.h"
 #include "third_party/blink/renderer/core/style/style_image_set.h"
+#include "third_party/blink/renderer/platform/loader/fetch/resource_fetcher.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 
 namespace blink {
@@ -41,6 +47,7 @@ CSSImageSetValue::CSSImageSetValue()
 CSSImageSetValue::~CSSImageSetValue() = default;
 
 const CSSImageSetOptionValue* CSSImageSetValue::GetBestOption(
+    const CSSLengthResolver& resolver,
     const float device_scale_factor) {
   // This method is implementing the selection logic described in the
   // "CSS Images Module Level 4" spec:
@@ -65,7 +72,7 @@ const CSSImageSetOptionValue* CSSImageSetValue::GetBestOption(
   if (options_.empty()) {
     for (const auto& i : *this) {
       auto* option = To<CSSImageSetOptionValue>(i.Get());
-      if (option->IsSupported()) {
+      if (option->IsSupported(resolver)) {
         options_.push_back(option);
       }
     }
@@ -78,20 +85,21 @@ const CSSImageSetOptionValue* CSSImageSetValue::GetBestOption(
       options_.push_back(nullptr);
     } else {
       std::stable_sort(options_.begin(), options_.end(),
-                       [](auto& left, auto& right) {
-                         return left->ComputedResolution() <
-                                right->ComputedResolution();
+                       [&resolver](auto& left, auto& right) {
+                         return left->ComputedResolution(resolver) <
+                                right->ComputedResolution(resolver);
                        });
-      auto last = std::unique(
-          options_.begin(), options_.end(), [](auto& left, auto& right) {
-            return left->ComputedResolution() == right->ComputedResolution();
-          });
+      auto last = std::unique(options_.begin(), options_.end(),
+                              [&resolver](auto& left, auto& right) {
+                                return left->ComputedResolution(resolver) ==
+                                       right->ComputedResolution(resolver);
+                              });
       options_.erase(last, options_.end());
     }
   }
 
   for (const auto& option : options_) {
-    if (option && option->ComputedResolution() >= device_scale_factor) {
+    if (option && option->ComputedResolution(resolver) >= device_scale_factor) {
       return option.Get();
     }
   }
@@ -99,25 +107,48 @@ const CSSImageSetOptionValue* CSSImageSetValue::GetBestOption(
   return options_.back().Get();
 }
 
-bool CSSImageSetValue::IsCachePending(const float device_scale_factor) const {
+bool CSSImageSetValue::IsCachePending(ResourceFetcher* fetcher,
+                                      const float device_scale_factor) const {
+  if (fetcher &&
+      RuntimeEnabledFeatures::StyleResourceFetcherIdentityCheckEnabled()) {
+    auto it = cached_images_.find(fetcher);
+    return it == cached_images_.end() ||
+           !EqualResolutions(device_scale_factor,
+                             it->value->device_scale_factor);
+  }
   return !cached_image_ ||
          !EqualResolutions(device_scale_factor, cached_device_scale_factor_);
 }
 
 StyleImage* CSSImageSetValue::CachedImage(
+    ResourceFetcher* fetcher,
     const float device_scale_factor) const {
-  DCHECK(!IsCachePending(device_scale_factor));
-  return cached_image_.Get();
+  DCHECK(!IsCachePending(fetcher, device_scale_factor));
+  if (fetcher &&
+      RuntimeEnabledFeatures::StyleResourceFetcherIdentityCheckEnabled()) {
+    auto it = cached_images_.find(fetcher);
+    if (it != cached_images_.end()) {
+      return it->value->image.Get();
+    }
+    return nullptr;
+  } else {
+    return cached_image_.Get();
+  }
 }
 
-StyleImage* CSSImageSetValue::CacheImage(
-    StyleImage* style_image,
-    const float device_scale_factor,
-    bool is_origin_clean) {
-  cached_image_ =
-      MakeGarbageCollected<StyleImageSet>(style_image, this, is_origin_clean);
-  cached_device_scale_factor_ = device_scale_factor;
-  return cached_image_.Get();
+StyleImage* CSSImageSetValue::CacheImage(ResourceFetcher* fetcher,
+                                         StyleImage* style_image,
+                                         const float device_scale_factor) {
+  StyleImage* image = MakeGarbageCollected<StyleImageSet>(style_image, this);
+  if (fetcher &&
+      RuntimeEnabledFeatures::StyleResourceFetcherIdentityCheckEnabled()) {
+    cached_images_.Set(fetcher, MakeGarbageCollected<CachedImageAndScale>(
+                                    image, device_scale_factor));
+  } else {
+    cached_image_ = image;
+    cached_device_scale_factor_ = device_scale_factor;
+  }
+  return image;
 }
 
 String CSSImageSetValue::CustomCSSText() const {
@@ -137,20 +168,91 @@ String CSSImageSetValue::CustomCSSText() const {
   return result.ReleaseString();
 }
 
-bool CSSImageSetValue::HasFailedOrCanceledSubresources() const {
-  if (!cached_image_) {
+bool CSSImageSetValue::HasFailedOrCanceledSubresources(
+    ResourceFetcher* fetcher) const {
+  // This lookup is intentionally not gated on the device scale factor. The
+  // per-fetcher map holds a single entry (the most recently cached image and
+  // its device scale factor), so we simply report the status of whatever is
+  // currently cached for this fetcher.
+  //
+  // The scenario including DSF in this evaluation would impact is loading the
+  // same stylesheet twice from the same document at two different DSF where the
+  // first load failed. (If the first load succeeded there would be no failure
+  // to report, the same as if we attempted to match DSF and found no load
+  // attempt). In this fail+success case including a DSF check would allow us to
+  // avoid an extra re-parse of the stylesheet, but that scenario is too
+  // edge-case to warrant further complicating the code for a small perf
+  // optimization.
+  StyleImage* image = nullptr;
+  if (fetcher &&
+      RuntimeEnabledFeatures::StyleResourceFetcherIdentityCheckEnabled()) {
+    auto it = cached_images_.find(fetcher);
+    if (it != cached_images_.end()) {
+      image = it->value->image.Get();
+    }
+  } else if (cached_image_) {
+    image = cached_image_.Get();
+  }
+  if (!image) {
     return false;
   }
+  ImageResourceContent* content = image->CachedImage();
+  return !content || content->LoadFailedOrCanceled();
+}
 
-  if (ImageResourceContent* cached_content = cached_image_->CachedImage()) {
-    return cached_content->LoadFailedOrCanceled();
+CSSImageSetValue* CSSImageSetValue::ResolveValuesAndCreateCopyIfNeeded(
+    const StyleResolverState& state) const {
+  CSSImageSetValue* new_value = MakeGarbageCollected<CSSImageSetValue>();
+  bool values_changed = false;
+  for (const auto& item : *this) {
+    const auto* option = To<CSSImageSetOptionValue>(item.Get());
+    const CSSValue& image = option->GetImage();
+    const CSSValue& resolved_image = state.ResolveGradients(image);
+    if (&image == &resolved_image) {
+      new_value->Append(*option);
+    } else {
+      values_changed = true;
+      new_value->Append(*MakeGarbageCollected<CSSImageSetOptionValue>(
+          &resolved_image, &option->GetResolution(), option->GetType()));
+    }
   }
+  if (values_changed) {
+    return new_value;
+  }
+  return nullptr;
+}
 
-  return true;
+const CSSImageSetValue& CSSImageSetValue::ResolveValuesIfNeeded(
+    const StyleResolverState& state) const {
+  if (CSSImageSetValue* resolved = ResolveValuesAndCreateCopyIfNeeded(state)) {
+    return *resolved;
+  }
+  return *this;
+}
+
+CSSImageSetValue& CSSImageSetValue::ResolveValuesIfNeeded(
+    const StyleResolverState& state) {
+  if (CSSImageSetValue* resolved = ResolveValuesAndCreateCopyIfNeeded(state)) {
+    return *resolved;
+  }
+  return *this;
+}
+
+bool CSSImageSetValue::HasRandomFunctions() const {
+  if (CSSValueList::HasRandomFunctions()) {
+    return true;
+  }
+  for (const auto& option : options_) {
+    if (option && option->HasRandomFunctions()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void CSSImageSetValue::TraceAfterDispatch(blink::Visitor* visitor) const {
   visitor->Trace(cached_image_);
+  visitor->Trace(cached_images_);
   visitor->Trace(options_);
   CSSValueList::TraceAfterDispatch(visitor);
 }

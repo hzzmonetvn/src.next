@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 
+#include "base/compiler_specific.h"
 #include "base/functional/bind.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/raw_ptr.h"
@@ -14,7 +15,6 @@
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/scoped_feature_list.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "net/base/features.h"
 #include "net/base/net_errors.h"
 #include "net/base/test_completion_callback.h"
@@ -58,14 +58,18 @@ class HttpAuthHandlerNegotiateTest : public PlatformTest,
                                      public WithTaskEnvironment {
  public:
   void SetUp() override {
-    scoped_feature_list_.InitAndEnableFeature(
+    AddScopedFeatureList().InitAndEnableFeature(
         features::kPartitionConnectionsByNetworkIsolationKey);
     network_anoymization_key_ = NetworkAnonymizationKey::CreateTransient();
 #if BUILDFLAG(IS_WIN)
-    auto auth_library =
-        std::make_unique<MockAuthLibrary>(const_cast<wchar_t*>(NEGOSSP_NAME));
-#else
+    auto auth_library = base::MakeRefCounted<MockAuthLibrary>(
+        const_cast<wchar_t*>(NEGOSSP_NAME));
+#elif BUILDFLAG(IS_ANDROID)
+    // MockAuthLibrary is DummySpnegoAuthenticator here, which is not an
+    // AuthLibrary and is not refcounted.
     auto auth_library = std::make_unique<MockAuthLibrary>();
+#else
+    auto auth_library = base::MakeRefCounted<MockAuthLibrary>();
 #endif
     auth_library_ = auth_library.get();
     resolver_ = std::make_unique<MockCachingHostResolver>(
@@ -96,7 +100,7 @@ class HttpAuthHandlerNegotiateTest : public PlatformTest,
   void SetupMocks(MockAuthLibrary* mock_library) {
 #if BUILDFLAG(IS_WIN)
     security_package_ = std::make_unique<SecPkgInfoW>();
-    memset(security_package_.get(), 0x0, sizeof(SecPkgInfoW));
+    UNSAFE_TODO(memset(security_package_.get(), 0x0, sizeof(SecPkgInfoW)));
     security_package_->cbMaxToken = 1337;
     mock_library->ExpectQuerySecurityPackageInfo(SEC_E_OK,
                                                  security_package_.get());
@@ -261,8 +265,6 @@ class HttpAuthHandlerNegotiateTest : public PlatformTest,
   }
 
  private:
-  base::test::ScopedFeatureList scoped_feature_list_;
-
   NetworkAnonymizationKey network_anoymization_key_;
 
 #if BUILDFLAG(IS_WIN)
@@ -279,6 +281,27 @@ class HttpAuthHandlerNegotiateTest : public PlatformTest,
   // up the mocks after passing ownership.
   raw_ptr<MockAuthLibrary> auth_library_;
 };
+
+#if BUILDFLAG(IS_WIN)
+// On Windows the SSPI calls run on a blocking sequence, so the handler must
+// report ERR_IO_PENDING to its caller rather than completing inline.
+TEST_F(HttpAuthHandlerNegotiateTest, GenerateAuthTokenIsAsync) {
+  SetupMocks(AuthLibrary());
+  std::unique_ptr<HttpAuthHandlerNegotiate> auth_handler;
+  ASSERT_EQ(
+      OK, CreateHandler(true, false, true, "http://alias:500", &auth_handler));
+  ASSERT_TRUE(auth_handler.get() != nullptr);
+
+  TestCompletionCallback callback;
+  HttpRequestInfo request_info;
+  std::string token;
+  int rv = auth_handler->GenerateAuthToken(nullptr, &request_info,
+                                           callback.callback(), &token);
+  EXPECT_THAT(rv, IsError(ERR_IO_PENDING));
+  EXPECT_THAT(callback.GetResult(rv), IsOk());
+  EXPECT_FALSE(token.empty());
+}
+#endif  // BUILDFLAG(IS_WIN)
 
 TEST_F(HttpAuthHandlerNegotiateTest, DisableCname) {
   SetupMocks(AuthLibrary());
@@ -360,6 +383,7 @@ TEST_F(HttpAuthHandlerNegotiateTest, CnameSync) {
   resolve_params.source = HostResolverSource::LOCAL_ONLY;
   std::unique_ptr<HostResolver::ResolveHostRequest> host_request1 =
       resolver()->CreateRequest(scheme_host_port, NetworkAnonymizationKey(),
+                                handles::kInvalidNetworkHandle,
                                 NetLogWithSource(), resolve_params);
   TestCompletionCallback callback2;
   int result = host_request1->Start(callback2.callback());
@@ -369,6 +393,7 @@ TEST_F(HttpAuthHandlerNegotiateTest, CnameSync) {
   // succeeds, to make sure the right NetworkAnonymizationKey was used.
   std::unique_ptr<HostResolver::ResolveHostRequest> host_request2 =
       resolver()->CreateRequest(scheme_host_port, network_anonymization_key(),
+                                handles::kInvalidNetworkHandle,
                                 NetLogWithSource(), resolve_params);
   TestCompletionCallback callback3;
   result = host_request2->Start(callback3.callback());
@@ -402,6 +427,7 @@ TEST_F(HttpAuthHandlerNegotiateTest, CnameAsync) {
   resolve_params.source = HostResolverSource::LOCAL_ONLY;
   std::unique_ptr<HostResolver::ResolveHostRequest> host_request1 =
       resolver()->CreateRequest(scheme_host_port, NetworkAnonymizationKey(),
+                                handles::kInvalidNetworkHandle,
                                 NetLogWithSource(), resolve_params);
   TestCompletionCallback callback2;
   int result = host_request1->Start(callback2.callback());
@@ -411,6 +437,7 @@ TEST_F(HttpAuthHandlerNegotiateTest, CnameAsync) {
   // succeeds, to make sure the right NetworkAnonymizationKey was used.
   std::unique_ptr<HostResolver::ResolveHostRequest> host_request2 =
       resolver()->CreateRequest(scheme_host_port, network_anonymization_key(),
+                                handles::kInvalidNetworkHandle,
                                 NetLogWithSource(), resolve_params);
   TestCompletionCallback callback3;
   result = host_request2->Start(callback3.callback());
@@ -459,8 +486,8 @@ TEST_F(HttpAuthHandlerNegotiateTest, MissingGSSAPI) {
   auto negotiate_factory = std::make_unique<HttpAuthHandlerNegotiate::Factory>(
       HttpAuthMechanismFactory());
   negotiate_factory->set_http_auth_preferences(&http_auth_preferences);
-  negotiate_factory->set_library(
-      std::make_unique<GSSAPISharedLibrary>("/this/library/does/not/exist"));
+  negotiate_factory->set_library(base::MakeRefCounted<GSSAPISharedLibrary>(
+      "/this/library/does/not/exist"));
 
   url::SchemeHostPort scheme_host_port(GURL("http://www.example.com"));
   std::unique_ptr<HttpAuthHandler> generic_handler;
@@ -530,9 +557,9 @@ TEST_F(HttpAuthHandlerNegotiateTest, OverrideAuthSystem) {
   negotiate_factory->set_http_auth_preferences(http_auth_preferences());
 #if BUILDFLAG(IS_WIN)
   negotiate_factory->set_library(
-      std::make_unique<MockAuthLibrary>(NEGOSSP_NAME));
+      base::MakeRefCounted<MockAuthLibrary>(NEGOSSP_NAME));
 #elif !BUILDFLAG(IS_ANDROID)
-  negotiate_factory->set_library(std::make_unique<MockAuthLibrary>());
+  negotiate_factory->set_library(base::MakeRefCounted<MockAuthLibrary>());
 #endif
 
   url::SchemeHostPort scheme_host_port{GURL("http://www.example.com")};

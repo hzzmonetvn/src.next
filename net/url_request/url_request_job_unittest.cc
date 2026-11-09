@@ -118,8 +118,6 @@ const MockTransaction kNoFilterTransaction = {
     base::Time(),
     "hello",
     {},
-    std::nullopt,
-    std::nullopt,
     TEST_MODE_NORMAL,
     MockTransactionHandler(),
     MockTransactionReadHandler(),
@@ -142,8 +140,6 @@ const MockTransaction kNoFilterTransactionWithInvalidLength = {
     base::Time(),
     "hello",
     {},
-    std::nullopt,
-    std::nullopt,
     TEST_MODE_NORMAL,
     MockTransactionHandler(),
     MockTransactionReadHandler(),
@@ -167,8 +163,6 @@ const MockTransaction kGZipTransaction = {
     base::Time(),
     "",
     {},
-    std::nullopt,
-    std::nullopt,
     TEST_MODE_NORMAL,
     base::BindRepeating(&GZipServer),
     MockTransactionReadHandler(),
@@ -192,8 +186,6 @@ const MockTransaction kGzipSlowTransaction = {
     base::Time(),
     "",
     {},
-    std::nullopt,
-    std::nullopt,
     TEST_MODE_SLOW_READ,
     base::BindRepeating(&GZipHelloServer),
     MockTransactionReadHandler(),
@@ -218,8 +210,6 @@ const MockTransaction kRedirectTransaction = {
     base::Time(),
     "hello",
     {},
-    std::nullopt,
-    std::nullopt,
     TEST_MODE_NORMAL,
     MockTransactionHandler(),
     MockTransactionReadHandler(),
@@ -242,8 +232,6 @@ const MockTransaction kEmptyBodyGzipTransaction = {
     base::Time(),
     "",
     {},
-    std::nullopt,
-    std::nullopt,
     TEST_MODE_NORMAL,
     MockTransactionHandler(),
     MockTransactionReadHandler(),
@@ -267,8 +255,6 @@ const MockTransaction kInvalidContentGZipTransaction = {
     base::Time(),
     "not a valid gzip body",
     {},
-    std::nullopt,
-    std::nullopt,
     TEST_MODE_NORMAL,
     MockTransactionHandler(),
     MockTransactionReadHandler(),
@@ -293,8 +279,6 @@ const MockTransaction kBrotliSlowTransaction = {
     base::Time(),
     "",
     {},
-    std::nullopt,
-    std::nullopt,
     TEST_MODE_SLOW_READ,
     base::BindRepeating(&BrotliHelloServer),
     MockTransactionReadHandler(),
@@ -318,9 +302,9 @@ TEST_F(URLRequestJobTest, TransactionNoFilter) {
 
   ScopedMockTransaction transaction(kNoFilterTransaction);
   TestDelegate d;
-  std::unique_ptr<URLRequest> req(
-      context->CreateRequest(GURL(transaction.url), DEFAULT_PRIORITY, &d,
-                             TRAFFIC_ANNOTATION_FOR_TESTS));
+  std::unique_ptr<URLRequest> req(context->CreateRequest(
+      GURL(transaction.url), DEFAULT_PRIORITY, &d, TRAFFIC_ANNOTATION_FOR_TESTS,
+      net::handles::kInvalidNetworkHandle));
 
   req->set_method("GET");
   req->Start();
@@ -345,9 +329,9 @@ TEST_F(URLRequestJobTest, TransactionNoFilterWithInvalidLength) {
 
   ScopedMockTransaction transaction(kNoFilterTransactionWithInvalidLength);
   TestDelegate d;
-  std::unique_ptr<URLRequest> req(
-      context->CreateRequest(GURL(transaction.url), DEFAULT_PRIORITY, &d,
-                             TRAFFIC_ANNOTATION_FOR_TESTS));
+  std::unique_ptr<URLRequest> req(context->CreateRequest(
+      GURL(transaction.url), DEFAULT_PRIORITY, &d, TRAFFIC_ANNOTATION_FOR_TESTS,
+      net::handles::kInvalidNetworkHandle));
 
   req->set_method("GET");
   req->Start();
@@ -371,9 +355,9 @@ TEST_F(URLRequestJobTest, TransactionNotifiedWhenDone) {
 
   ScopedMockTransaction transaction(kGZipTransaction);
   TestDelegate d;
-  std::unique_ptr<URLRequest> req(
-      context->CreateRequest(GURL(transaction.url), DEFAULT_PRIORITY, &d,
-                             TRAFFIC_ANNOTATION_FOR_TESTS));
+  std::unique_ptr<URLRequest> req(context->CreateRequest(
+      GURL(transaction.url), DEFAULT_PRIORITY, &d, TRAFFIC_ANNOTATION_FOR_TESTS,
+      net::handles::kInvalidNetworkHandle));
 
   req->set_method("GET");
   req->Start();
@@ -399,9 +383,9 @@ TEST_F(URLRequestJobTest, SyncTransactionNotifiedWhenDone) {
 
   ScopedMockTransaction transaction(kGZipTransaction);
   TestDelegate d;
-  std::unique_ptr<URLRequest> req(
-      context->CreateRequest(GURL(kGZipTransaction.url), DEFAULT_PRIORITY, &d,
-                             TRAFFIC_ANNOTATION_FOR_TESTS));
+  std::unique_ptr<URLRequest> req(context->CreateRequest(
+      GURL(kGZipTransaction.url), DEFAULT_PRIORITY, &d,
+      TRAFFIC_ANNOTATION_FOR_TESTS, net::handles::kInvalidNetworkHandle));
   transaction.test_mode = TEST_MODE_SYNC_ALL;
 
   req->set_method("GET");
@@ -429,9 +413,9 @@ TEST_F(URLRequestJobTest, SyncSlowTransaction) {
 
   ScopedMockTransaction transaction(kGZipTransaction);
   TestDelegate d;
-  std::unique_ptr<URLRequest> req(
-      context->CreateRequest(GURL(transaction.url), DEFAULT_PRIORITY, &d,
-                             TRAFFIC_ANNOTATION_FOR_TESTS));
+  std::unique_ptr<URLRequest> req(context->CreateRequest(
+      GURL(transaction.url), DEFAULT_PRIORITY, &d, TRAFFIC_ANNOTATION_FOR_TESTS,
+      net::handles::kInvalidNetworkHandle));
   transaction.test_mode = TEST_MODE_SYNC_ALL | TEST_MODE_SLOW_READ;
   transaction.handler = base::BindRepeating(&BigGZipServer);
 
@@ -457,9 +441,9 @@ TEST_F(URLRequestJobTest, RedirectTransactionNotifiedWhenDone) {
 
   ScopedMockTransaction transaction(kRedirectTransaction);
   TestDelegate d;
-  std::unique_ptr<URLRequest> req(
-      context->CreateRequest(GURL(transaction.url), DEFAULT_PRIORITY, &d,
-                             TRAFFIC_ANNOTATION_FOR_TESTS));
+  std::unique_ptr<URLRequest> req(context->CreateRequest(
+      GURL(transaction.url), DEFAULT_PRIORITY, &d, TRAFFIC_ANNOTATION_FOR_TESTS,
+      net::handles::kInvalidNetworkHandle));
 
   req->set_method("GET");
   req->Start();
@@ -518,9 +502,9 @@ TEST_F(URLRequestJobTest, RedirectTransactionWithReferrerPolicyHeader) {
     auto context = context_builder->Build();
 
     TestDelegate d;
-    std::unique_ptr<URLRequest> req(
-        context->CreateRequest(GURL(transaction.url), DEFAULT_PRIORITY, &d,
-                               TRAFFIC_ANNOTATION_FOR_TESTS));
+    std::unique_ptr<URLRequest> req(context->CreateRequest(
+        GURL(transaction.url), DEFAULT_PRIORITY, &d,
+        TRAFFIC_ANNOTATION_FOR_TESTS, net::handles::kInvalidNetworkHandle));
 
     req->set_referrer_policy(test.original_referrer_policy);
     req->SetReferrer(test.original_referrer);
@@ -551,9 +535,9 @@ TEST_F(URLRequestJobTest, TransactionNotCachedWhenNetworkDelegateRedirects) {
 
   ScopedMockTransaction transaction(kGZipTransaction);
   TestDelegate d;
-  std::unique_ptr<URLRequest> req(
-      context->CreateRequest(GURL(transaction.url), DEFAULT_PRIORITY, &d,
-                             TRAFFIC_ANNOTATION_FOR_TESTS));
+  std::unique_ptr<URLRequest> req(context->CreateRequest(
+      GURL(transaction.url), DEFAULT_PRIORITY, &d, TRAFFIC_ANNOTATION_FOR_TESTS,
+      net::handles::kInvalidNetworkHandle));
 
   req->set_method("GET");
   req->Start();
@@ -575,9 +559,9 @@ TEST_F(URLRequestJobTest, EmptyBodySkipFilter) {
 
   ScopedMockTransaction transaction(kEmptyBodyGzipTransaction);
   TestDelegate d;
-  std::unique_ptr<URLRequest> req(
-      context->CreateRequest(GURL(transaction.url), DEFAULT_PRIORITY, &d,
-                             TRAFFIC_ANNOTATION_FOR_TESTS));
+  std::unique_ptr<URLRequest> req(context->CreateRequest(
+      GURL(transaction.url), DEFAULT_PRIORITY, &d, TRAFFIC_ANNOTATION_FOR_TESTS,
+      net::handles::kInvalidNetworkHandle));
 
   req->set_method("GET");
   req->Start();
@@ -600,9 +584,9 @@ TEST_F(URLRequestJobTest, InvalidContentGZipTransaction) {
 
   ScopedMockTransaction transaction(kInvalidContentGZipTransaction);
   TestDelegate d;
-  std::unique_ptr<URLRequest> req(
-      context->CreateRequest(GURL(transaction.url), DEFAULT_PRIORITY, &d,
-                             TRAFFIC_ANNOTATION_FOR_TESTS));
+  std::unique_ptr<URLRequest> req(context->CreateRequest(
+      GURL(transaction.url), DEFAULT_PRIORITY, &d, TRAFFIC_ANNOTATION_FOR_TESTS,
+      net::handles::kInvalidNetworkHandle));
 
   req->set_method("GET");
   req->Start();
@@ -628,9 +612,9 @@ TEST_F(URLRequestJobTest, SlowFilterRead) {
 
   ScopedMockTransaction transaction(kGzipSlowTransaction);
   TestDelegate d;
-  std::unique_ptr<URLRequest> req(
-      context->CreateRequest(GURL(transaction.url), DEFAULT_PRIORITY, &d,
-                             TRAFFIC_ANNOTATION_FOR_TESTS));
+  std::unique_ptr<URLRequest> req(context->CreateRequest(
+      GURL(transaction.url), DEFAULT_PRIORITY, &d, TRAFFIC_ANNOTATION_FOR_TESTS,
+      net::handles::kInvalidNetworkHandle));
 
   req->set_method("GET");
   req->Start();
@@ -652,9 +636,9 @@ TEST_F(URLRequestJobTest, SlowBrotliRead) {
 
   ScopedMockTransaction transaction(kBrotliSlowTransaction);
   TestDelegate d;
-  std::unique_ptr<URLRequest> req(
-      context->CreateRequest(GURL(transaction.url), DEFAULT_PRIORITY, &d,
-                             TRAFFIC_ANNOTATION_FOR_TESTS));
+  std::unique_ptr<URLRequest> req(context->CreateRequest(
+      GURL(transaction.url), DEFAULT_PRIORITY, &d, TRAFFIC_ANNOTATION_FOR_TESTS,
+      net::handles::kInvalidNetworkHandle));
 
   req->set_method("GET");
   req->Start();
@@ -749,9 +733,7 @@ TEST(URLRequestJobComputeReferrer, DoesntTruncateReferrerWithLongRef) {
 
 TEST(URLRequestJobComputeReferrer, InvalidSchemeReferrer) {
   const GURL kOriginalReferrer("about:blank");
-  ASSERT_FALSE(url::IsReferrerScheme(
-      kOriginalReferrer.spec().data(),
-      kOriginalReferrer.parsed_for_possibly_invalid_spec().scheme));
+  ASSERT_FALSE(url::IsReferrerScheme(kOriginalReferrer.scheme()));
 
   EXPECT_EQ(URLRequestJob::ComputeReferrerForPolicy(ReferrerPolicy::NEVER_CLEAR,
                                                     kOriginalReferrer,
@@ -762,47 +744,6 @@ TEST(URLRequestJobComputeReferrer, InvalidSchemeReferrer) {
                                                     kOriginalReferrer,
                                                     GURL("https://google.com")),
             GURL());
-}
-
-TEST(URLRequestJobComputeReferrer, CapReferrerOnCrossOrigin) {
-  base::test::ScopedFeatureList feature_list;
-  feature_list.InitAndEnableFeature(
-      features::kCapReferrerToOriginOnCrossOrigin);
-
-  const GURL kOriginalReferrer("https://boggle.com/path");
-
-  EXPECT_EQ(URLRequestJob::ComputeReferrerForPolicy(ReferrerPolicy::NEVER_CLEAR,
-                                                    kOriginalReferrer,
-                                                    GURL("https://google.com")),
-            GURL("https://boggle.com/"));
-}
-
-TEST(URLRequestJobComputeReferrer,
-     CapReferrerOnCrossOriginRespectsStricterPolicy) {
-  base::test::ScopedFeatureList feature_list;
-  feature_list.InitAndEnableFeature(
-      features::kCapReferrerToOriginOnCrossOrigin);
-
-  const GURL kOriginalReferrer("https://boggle.com/path");
-
-  EXPECT_EQ(URLRequestJob::ComputeReferrerForPolicy(ReferrerPolicy::NO_REFERRER,
-                                                    kOriginalReferrer,
-                                                    GURL("https://google.com")),
-            GURL());
-}
-
-TEST(URLRequestJobComputeReferrer,
-     CapReferrerOnCrossOriginDoesntCapOnSameOrigin) {
-  base::test::ScopedFeatureList feature_list;
-  feature_list.InitAndEnableFeature(
-      features::kCapReferrerToOriginOnCrossOrigin);
-
-  const GURL kOriginalReferrer("https://boggle.com/path");
-
-  EXPECT_EQ(URLRequestJob::ComputeReferrerForPolicy(ReferrerPolicy::NEVER_CLEAR,
-                                                    kOriginalReferrer,
-                                                    GURL("https://boggle.com")),
-            kOriginalReferrer);
 }
 
 }  // namespace net

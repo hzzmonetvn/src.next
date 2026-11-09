@@ -4,14 +4,16 @@
 
 from collections import defaultdict
 import fnmatch
+import inspect
 import json
 import os
 import re
 import subprocess
 import sys
-
+import time
 
 _REPO_ROOT = os.path.abspath(os.path.dirname(__file__))
+
 
 # TODO(dcheng): It's kind of horrible that this is copy and pasted from
 # presubmit_canned_checks.py, but it's far easier than any of the alternatives.
@@ -21,7 +23,10 @@ def _ReportErrorFileAndLine(filename, line_num, dummy_line):
 
 
 class MockCannedChecks(object):
-    def _FindNewViolationsOfRule(self, callable_rule, input_api,
+
+    def _FindNewViolationsOfRule(self,
+                                 callable_rule,
+                                 input_api,
                                  source_file_filter=None,
                                  error_formatter=_ReportErrorFileAndLine):
         """Find all newly introduced violations of a per-line rule (a callable).
@@ -45,7 +50,7 @@ class MockCannedChecks(object):
             # Shelling out to the SCM to determine the changed region can be
             # quite expensive on Win32. Assuming that most files will be kept
             # problem-free, we can skip the SCM operations most of the time.
-            extension = str(f.LocalPath()).rsplit('.', 1)[-1]
+            extension = str(f.UnixLocalPath()).rsplit('.', 1)[-1]
             if all(callable_rule(extension, line) for line in f.NewContents()):
                 # No violation found in full text: can skip considering diff.
                 continue
@@ -65,6 +70,19 @@ class MockInputApi(object):
   attribute as the list of changed files.
   """
 
+    DEFAULT_FILES_TO_CHECK = (
+        r'.+\.c$',
+        r'.+\.cc$',
+        r'.+\.cpp$',
+        r'.+\.h$',
+        r'.+\.m$',
+        r'.+\.mm$',
+        r'.+\.go$',
+        r'.+\.py$',
+        r'.+\.js$',
+        r'.+\.ts$',
+        r'.+\.rs$',
+    )
     DEFAULT_FILES_TO_SKIP = ()
 
     def __init__(self):
@@ -73,7 +91,21 @@ class MockInputApi(object):
         self.fnmatch = fnmatch
         self.json = json
         self.re = re
-        self.os_path = os.path
+        self.time = time
+
+        # We want os_path.exists() and os_path.isfile() to work for files
+        # that are both in the filesystem and mock files we have added
+        # via InitFiles().
+        # By setting os_path to a copy of os.path rather than directly we
+        # can not only have os_path.exists() be a combined output for fake
+        # files and real files in the filesystem.
+        import importlib.util
+        SPEC_OS_PATH = importlib.util.find_spec('os.path')
+        os_path1 = importlib.util.module_from_spec(SPEC_OS_PATH)
+        SPEC_OS_PATH.loader.exec_module(os_path1)
+        sys.modules['os_path1'] = os_path1
+        self.os_path = os_path1
+
         self.platform = sys.platform
         self.python_executable = sys.executable
         self.python3_executable = sys.executable
@@ -106,16 +138,29 @@ class MockInputApi(object):
         def mock_exists(path):
             if not os.path.isabs(path):
                 path = os.path.join(self.presubmit_local_path, path)
-            return path in files_that_exist
+            path = os.path.normpath(path)
+            return path in files_that_exist or any(
+                f.startswith(path)
+                for f in files_that_exist) or os.path.exists(path)
+
+        def mock_isfile(path):
+            if not os.path.isabs(path):
+                path = os.path.join(self.presubmit_local_path, path)
+            path = os.path.normpath(path)
+            return path in files_that_exist or os.path.isfile(path)
 
         def mock_glob(pattern, *args, **kwargs):
-          return fnmatch.filter(files_that_exist, pattern)
+            return fnmatch.filter(files_that_exist, pattern)
 
         # Do not stub these in the constructor to not break existing tests.
         self.os_path.exists = mock_exists
+        self.os_path.isfile = mock_isfile
         self.glob = mock_glob
 
-    def AffectedFiles(self, file_filter=None, include_deletes=True):
+    def AffectedFiles(self,
+                      include_deletes=True,
+                      file_filter=None,
+                      include_dirs=False):
         for file in self.files:
             if file_filter and not file_filter(file):
                 continue
@@ -139,7 +184,7 @@ class MockInputApi(object):
                                   include_deletes=False)
 
     def FilterSourceFile(self, file, files_to_check=(), files_to_skip=()):
-        local_path = file.LocalPath()
+        local_path = file.UnixLocalPath()
         found_in_files_to_check = not files_to_check
         if files_to_check:
             if type(files_to_check) is str:
@@ -163,17 +208,84 @@ class MockInputApi(object):
     def LocalPaths(self):
         return [file.LocalPath() for file in self.files]
 
+    def AffectedExtensions(self):
+        exts = set()
+        for f in self.AffectedFiles(include_deletes=True):
+            path = f.LocalPath().replace('\\', '/')
+            basename = self.os_path.basename(path).lower()
+            if basename.startswith('.') and '.' not in basename[1:]:
+                exts.add(basename)
+            else:
+                exts.add(self.os_path.splitext(basename)[1])
+        return frozenset(exts)
+
     def PresubmitLocalPath(self):
         return self.presubmit_local_path
 
     def ReadFile(self, filename, mode='r'):
         if hasattr(filename, 'AbsoluteLocalPath'):
             filename = filename.AbsoluteLocalPath()
+        norm_filename = os.path.normpath(filename)
         for file_ in self.files:
-            if filename in (file_.LocalPath(), file_.AbsoluteLocalPath()):
+            to_check = (file_.LocalPath(), file_.AbsoluteLocalPath())
+            if filename in to_check or norm_filename in to_check:
                 return '\n'.join(file_.NewContents())
         # Otherwise, file is not in our mock API.
         raise IOError("No such file or directory: '%s'" % filename)
+
+    class Command(object):
+
+        def __init__(self,
+                     name,
+                     cmd,
+                     kwargs,
+                     message=None,
+                     python3=True,
+                     output_parser=None):
+            self.name = name
+            self.cmd = cmd
+            self.stdin = kwargs.get('stdin')
+            self.kwargs = kwargs.copy()
+            self.kwargs['stdout'] = subprocess.PIPE
+            if output_parser and len(
+                    inspect.signature(output_parser).parameters) == 3:
+                self.kwargs['stderr'] = subprocess.PIPE
+            else:
+                self.kwargs['stderr'] = subprocess.STDOUT
+            self.kwargs['stdin'] = subprocess.PIPE
+            self.message = message
+            self.output_parser = output_parser
+
+    def RunTests(self, tests_mix, parallel=True):
+        results = []
+        for test in tests_mix:
+            if not hasattr(test, 'cmd'):
+                if test:
+                    results.append(test)
+                continue
+            kwargs = test.kwargs.copy()
+            if not kwargs.get('cwd'):
+                kwargs['cwd'] = self.PresubmitLocalPath()
+            p = self.subprocess.Popen(test.cmd, **kwargs)
+            stdout, stderr = p.communicate(input=test.stdin)
+            returncode = p.returncode
+            stdout = stdout.decode('utf-8', 'ignore')
+            if test.output_parser:
+                if stderr is not None:
+                    stderr = stderr.decode('utf-8', 'ignore')
+                    res = test.output_parser(returncode, stdout, stderr)
+                else:
+                    res = test.output_parser(returncode, stdout)
+                if res:
+                    if isinstance(res, (list, tuple)):
+                        results.extend(res)
+                    else:
+                        results.append(res)
+            elif returncode != 0 and test.message:
+                results.append(
+                    test.message('%s failed\n%s' % (test.name, stdout)))
+        return results
+
 
 
 class MockOutputApi(object):
@@ -185,41 +297,45 @@ class MockOutputApi(object):
 
     class PresubmitResult(object):
 
-        def __init__(self, message, items=None, long_text=''):
+        def __init__(self, message, items=None, long_text='', locations=[]):
             self.message = message
             self.items = items
             self.long_text = long_text
+            self.locations = locations
 
         def __repr__(self):
             return self.message
 
     class PresubmitError(PresubmitResult):
 
-        def __init__(self, message, items=None, long_text=''):
-            MockOutputApi.PresubmitResult.__init__(self, message, items,
-                                                   long_text)
+        def __init__(self, *args, **kwargs):
+            MockOutputApi.PresubmitResult.__init__(self, *args, **kwargs)
             self.type = 'error'
 
     class PresubmitPromptWarning(PresubmitResult):
 
-        def __init__(self, message, items=None, long_text=''):
-            MockOutputApi.PresubmitResult.__init__(self, message, items,
-                                                   long_text)
+        def __init__(self, *args, **kwargs):
+            MockOutputApi.PresubmitResult.__init__(self, *args, **kwargs)
             self.type = 'warning'
 
     class PresubmitNotifyResult(PresubmitResult):
 
-        def __init__(self, message, items=None, long_text=''):
-            MockOutputApi.PresubmitResult.__init__(self, message, items,
-                                                   long_text)
+        def __init__(self, *args, **kwargs):
+            MockOutputApi.PresubmitResult.__init__(self, *args, **kwargs)
             self.type = 'notify'
 
     class PresubmitPromptOrNotify(PresubmitResult):
 
-        def __init__(self, message, items=None, long_text=''):
-            MockOutputApi.PresubmitResult.__init__(self, message, items,
-                                                   long_text)
+        def __init__(self, *args, **kwargs):
+            MockOutputApi.PresubmitResult.__init__(self, *args, **kwargs)
             self.type = 'promptOrNotify'
+
+    class PresubmitResultLocation(object):
+
+        def __init__(self, file_path, start_line, end_line):
+            self.file_path = file_path
+            self.start_line = start_line
+            self.end_line = end_line
 
     def __init__(self):
         self.more_cc = []
@@ -240,14 +356,25 @@ class MockFile(object):
                  new_contents,
                  old_contents=None,
                  action='A',
-                 scm_diff=None):
+                 scm_diff=None,
+                 local_root=None):
         self._local_path = local_path
+        self._local_root = local_root or _REPO_ROOT
         self._new_contents = new_contents
         self._changed_contents = [(i + 1, l)
                                   for i, l in enumerate(new_contents)]
         self._action = action
+        import difflib
         if scm_diff:
             self._scm_diff = scm_diff
+        elif old_contents:
+            self._scm_diff = "\n".join(
+                difflib.unified_diff(
+                    old_contents,
+                    new_contents,
+                    fromfile=local_path,
+                    tofile=local_path,
+                    lineterm="")) + "\n"
         else:
             self._scm_diff = ("--- /dev/null\n+++ %s\n@@ -0,0 +1,%d @@\n" %
                               (local_path, len(new_contents)))
@@ -271,13 +398,25 @@ class MockFile(object):
         return self._local_path
 
     def AbsoluteLocalPath(self):
-        return os.path.join(_REPO_ROOT, self._local_path)
+        if os.path.isabs(self._local_path):
+            return self._local_path
+        return os.path.join(self._local_root, self._local_path)
+
+    # This method must be functionally identical to
+    # AffectedFile.UnixLocalPath(), but must normalize Windows-style
+    # paths even on non-Windows platforms because tests contain them
+    def UnixLocalPath(self):
+        return self._local_path.replace('\\', '/')
 
     def GenerateScmDiff(self):
         return self._scm_diff
 
     def OldContents(self):
         return self._old_contents
+
+    def Extension(self):
+        _, ext = os.path.splitext(self._local_path)
+        return ext
 
     def rfind(self, p):
         """Required when os.path.basename() is called on MockFile."""
@@ -316,10 +455,15 @@ class MockChange(object):
         return self._changed_files
 
     def AffectedFiles(self,
-                      include_dirs=False,
                       include_deletes=True,
-                      file_filter=None):
-        return self._changed_files
+                      file_filter=None,
+                      include_dirs=False):
+        files = self._changed_files
+        if not include_deletes:
+            files = list(filter(lambda f: f.Action() != 'D', files))
+        if file_filter:
+            files = list(filter(file_filter, files))
+        return files
 
     def GitFootersFromDescription(self):
         return self.footers

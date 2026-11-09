@@ -4,16 +4,14 @@
 
 #include "components/embedder_support/content_settings_utils.h"
 
-#include "base/feature_list.h"
 #include "components/content_settings/browser/page_specific_content_settings.h"
 #include "components/content_settings/core/browser/cookie_settings.h"
 #include "components/content_settings/core/common/content_settings.h"
 #include "components/content_settings/core/common/content_settings_utils.h"
 #include "components/content_settings/core/common/cookie_settings_base.h"
 #include "content/public/browser/browser_thread.h"
-#include "net/base/features.h"
+#include "net/cookies/cookie_partition_key.h"
 #include "net/cookies/cookie_setting_override.h"
-#include "net/cookies/cookie_util.h"
 #include "net/cookies/site_for_cookies.h"
 #include "url/gurl.h"
 #include "url/origin.h"
@@ -25,45 +23,22 @@ using StorageType =
 
 namespace {
 
-//  If storage partitioning is active, third-party partitioned storage is
-//  allowed by default, and access is only blocked due to general third-party
-//  cookie blocking (and not due to a user specified pattern) then storage
-//  access can be allowed.
-bool PartitionedStorageByDefaultAllowed(
-    const content_settings::CookieSettingsBase::CookieSettingWithMetadata&
-        cookie_settings) {
-  return base::FeatureList::IsEnabled(
-             net::features::kThirdPartyStoragePartitioning) &&
-         base::FeatureList::IsEnabled(
-             net::features::kThirdPartyPartitionedStorageAllowedByDefault) &&
-         cookie_settings.BlockedByThirdPartyCookieBlocking();
-}
-
 bool AllowWorkerStorageAccess(
     StorageType storage_type,
     const GURL& url,
     const std::vector<content::GlobalRenderFrameHostId>& render_frames,
-    const content_settings::CookieSettings* cookie_settings) {
+    const content_settings::CookieSettings* cookie_settings,
+    const blink::StorageKey& storage_key) {
   // TODO(crbug.com/40247160): Consider whether the following check should
   // somehow determine real CookieSettingOverrides rather than default to none.
-  content_settings::CookieSettingsBase::CookieSettingWithMetadata
-      cookie_settings_metadata;
+  std::optional<url::Origin> top_frame_origin =
+      storage_key.IsFirstPartyContext()
+          ? storage_key.origin()
+          : url::Origin::Create(storage_key.top_level_site().GetURL());
 
-  bool allow = cookie_settings->IsFullCookieAccessAllowed(
-      url, net::SiteForCookies::FromUrl(url), url::Origin::Create(url),
-      net::CookieSettingOverrides(), &cookie_settings_metadata);
-
-  if (!allow && PartitionedStorageByDefaultAllowed(cookie_settings_metadata)) {
-    allow = true;
-  }
-
-  // Allow storage when --test-third-party-cookie-phaseout is used, but ensure
-  // that only partitioned storage is available. This developer flag is meant to
-  // simulate Chrome's behavior when 3P cookies are turned down to help
-  // developers test their site.
-  if (!allow && net::cookie_util::IsForceThirdPartyCookieBlockingEnabled()) {
-    allow = true;
-  }
+  bool allow = cookie_settings->IsAnyStorageAccessAllowed(
+      url, storage_key.ToNetSiteForCookies(), top_frame_origin,
+      net::CookieSettingOverrides(), storage_key.ToCookiePartitionKey());
 
   for (const auto& it : render_frames) {
     auto* rfh = content::RenderFrameHost::FromID(it);
@@ -82,6 +57,7 @@ content::AllowServiceWorkerResult AllowServiceWorker(
     const GURL& scope,
     const net::SiteForCookies& site_for_cookies,
     const std::optional<url::Origin>& top_frame_origin,
+    const blink::StorageKey& storage_key,
     const content_settings::CookieSettings* cookie_settings,
     const HostContentSettingsMap* settings_map) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
@@ -95,32 +71,12 @@ content::AllowServiceWorkerResult AllowServiceWorker(
       first_party_url, first_party_url, ContentSettingsType::JAVASCRIPT, &info);
   bool allow_javascript = setting == CONTENT_SETTING_ALLOW;
 
-  // Check if cookies are allowed. Storage Access API grants and Top-Level
-  // Storage Access API grants may only be considered if storage is partitioned
-  // (or if Storage Access API is intended to grant access to storage - which is
-  // a deviation from the spec, but at least one embedder wants that ability).
+  // Check if cookies/storage are allowed.
   // TODO(crbug.com/40247160): Consider whether the following check should
   // also consider the third-party cookie user bypass override.
-  content_settings::CookieSettingsBase::CookieSettingWithMetadata
-      cookie_settings_metadata;
-
-  bool allow_cookies = cookie_settings->IsFullCookieAccessAllowed(
-      scope, site_for_cookies, top_frame_origin,
-      cookie_settings->SettingOverridesForStorage(), &cookie_settings_metadata);
-
-  if (!allow_cookies &&
-      PartitionedStorageByDefaultAllowed(cookie_settings_metadata)) {
-    allow_cookies = true;
-  }
-
-  // Allow storage when --test-third-party-cookie-phaseout is used, but ensure
-  // that only partitioned storage is available. This developer flag is meant to
-  // simulate Chrome's behavior when 3P cookies are turned down to help
-  // developers test their site.
-  if (!allow_cookies &&
-      net::cookie_util::IsForceThirdPartyCookieBlockingEnabled()) {
-    allow_cookies = true;
-  }
+  bool allow_cookies = cookie_settings->IsAnyStorageAccessAllowed(
+      scope, site_for_cookies, top_frame_origin, net::CookieSettingOverrides(),
+      storage_key.ToCookiePartitionKey());
 
   return content::AllowServiceWorkerResult::FromPolicy(!allow_javascript,
                                                        !allow_cookies);
@@ -136,24 +92,9 @@ bool AllowSharedWorker(
     int render_process_id,
     int render_frame_id,
     const content_settings::CookieSettings* cookie_settings) {
-  content_settings::CookieSettingsBase::CookieSettingWithMetadata
-      cookie_settings_metadata;
-
-  bool allow = cookie_settings->IsFullCookieAccessAllowed(
+  bool allow = cookie_settings->IsAnyStorageAccessAllowed(
       worker_url, site_for_cookies, top_frame_origin,
-      cookie_settings->SettingOverridesForStorage(), &cookie_settings_metadata);
-
-  if (!allow && PartitionedStorageByDefaultAllowed(cookie_settings_metadata)) {
-    allow = true;
-  }
-
-  // Allow storage when --test-third-party-cookie-phaseout is used, but ensure
-  // that only partitioned storage is available. This developer flag is meant to
-  // simulate Chrome's behavior when 3P cookies are turned down to help
-  // developers test their site.
-  if (!allow && net::cookie_util::IsForceThirdPartyCookieBlockingEnabled()) {
-    allow = true;
-  }
+      net::CookieSettingOverrides(), storage_key.ToCookiePartitionKey());
 
   content_settings::PageSpecificContentSettings::SharedWorkerAccessed(
       render_process_id, render_frame_id, worker_url, name, storage_key,
@@ -164,32 +105,36 @@ bool AllowSharedWorker(
 bool AllowWorkerFileSystem(
     const GURL& url,
     const std::vector<content::GlobalRenderFrameHostId>& render_frames,
-    const content_settings::CookieSettings* cookie_settings) {
+    const content_settings::CookieSettings* cookie_settings,
+    const blink::StorageKey& storage_key) {
   return AllowWorkerStorageAccess(StorageType::FILE_SYSTEM, url, render_frames,
-                                  cookie_settings);
+                                  cookie_settings, storage_key);
 }
 
 bool AllowWorkerIndexedDB(
     const GURL& url,
     const std::vector<content::GlobalRenderFrameHostId>& render_frames,
-    const content_settings::CookieSettings* cookie_settings) {
+    const content_settings::CookieSettings* cookie_settings,
+    const blink::StorageKey& storage_key) {
   return AllowWorkerStorageAccess(StorageType::INDEXED_DB, url, render_frames,
-                                  cookie_settings);
+                                  cookie_settings, storage_key);
 }
 
 bool AllowWorkerCacheStorage(
     const GURL& url,
     const std::vector<content::GlobalRenderFrameHostId>& render_frames,
-    const content_settings::CookieSettings* cookie_settings) {
+    const content_settings::CookieSettings* cookie_settings,
+    const blink::StorageKey& storage_key) {
   return AllowWorkerStorageAccess(StorageType::CACHE, url, render_frames,
-                                  cookie_settings);
+                                  cookie_settings, storage_key);
 }
 
 bool AllowWorkerWebLocks(
     const GURL& url,
-    const content_settings::CookieSettings* cookie_settings) {
+    const content_settings::CookieSettings* cookie_settings,
+    const blink::StorageKey& storage_key) {
   return AllowWorkerStorageAccess(StorageType::WEB_LOCKS, url, {},
-                                  cookie_settings);
+                                  cookie_settings, storage_key);
 }
 
 }  // namespace embedder_support

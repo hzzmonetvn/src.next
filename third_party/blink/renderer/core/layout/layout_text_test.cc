@@ -18,6 +18,7 @@
 #include "third_party/blink/renderer/core/layout/inline/inline_node_data.h"
 #include "third_party/blink/renderer/core/testing/core_unit_test_helper.h"
 #include "third_party/blink/renderer/platform/testing/font_test_helpers.h"
+#include "third_party/blink/renderer/platform/testing/runtime_enabled_features_test_helpers.h"
 
 namespace blink {
 
@@ -27,15 +28,15 @@ namespace {
 
 class LayoutTextTest : public RenderingTest {
  public:
-  void SetBasicBody(const char* message) {
-    SetBodyInnerHTML(String::Format(
-        "<div id='target' style='font-size: 10px;'>%s</div>", message));
+  void SetBasicBody(const char* content) {
+    SetBodyInnerHTML(StrCat(
+        {"<div id='target' style='font-size: 10px;'>", content, "</div>"}));
   }
 
-  void SetAhemBody(const char* message, const unsigned width) {
-    SetBodyInnerHTML(String::Format(
-        "<div id='target' style='font: 10px Ahem; width: %uem'>%s</div>", width,
-        message));
+  void SetAhemBody(const char* content, const unsigned width) {
+    SetBodyInnerHTML(
+        StrCat({"<div id='target' style='font: 10px Ahem; width: ",
+                String::Number(width), "em'>", content, "</div>"}));
   }
 
   LayoutText* GetLayoutTextById(const char* id) {
@@ -45,7 +46,7 @@ class LayoutTextTest : public RenderingTest {
   LayoutText* GetBasicText() { return GetLayoutTextById("target"); }
 
   void SetSelectionAndUpdateLayoutSelection(const std::string& selection_text) {
-    const SelectionInDOMTree selection =
+    const SelectionInDomTree selection =
         SelectionSample::SetSelectionText(GetDocument().body(), selection_text);
     UpdateAllLifecyclePhasesForTest();
     Selection().SetSelection(selection, SetSelectionOptions());
@@ -114,17 +115,18 @@ class LayoutTextTest : public RenderingTest {
     }
     const InlineNodeData& data = *block_flow.GetInlineNodeData();
     std::ostringstream stream;
-    for (const InlineItem& item : data.items) {
+    for (const Member<InlineItem>& item_ptr : data.items) {
+      const InlineItem& item = *item_ptr;
       if (item.Type() != InlineItem::kText) {
         continue;
       }
       if (item.GetLayoutObject() == layout_text) {
         stream << "*";
       }
-      stream << "{'"
-             << data.text_content.Substring(item.StartOffset(), item.Length())
-                    .Utf8()
-             << "'";
+      stream
+          << "{'"
+          << data.text_content.substr(item.StartOffset(), item.Length()).Utf8()
+          << "'";
       if (const auto* shape_result = item.TextShapeResult()) {
         stream << ", ShapeResult=" << shape_result->StartIndex() << "+"
                << shape_result->NumCharacters();
@@ -151,8 +153,8 @@ class LayoutTextTest : public RenderingTest {
   unsigned CountNumberOfGlyphs(const LayoutText& layout_text) {
     auto* const items = layout_text.GetInlineItems();
     return std::accumulate(items->begin(), items->end(), 0u,
-                           [](unsigned sum, const InlineItem& item) {
-                             return sum + item.TextShapeResult()->NumGlyphs();
+                           [](unsigned sum, const Member<InlineItem>& item) {
+                             return sum + item->TextShapeResult()->NumGlyphs();
                            });
   }
 };
@@ -170,9 +172,9 @@ TEST_F(LayoutTextTest, PrewarmFamily) {
   )HTML");
   EXPECT_THAT(prewarmer.PrewarmedFamilyNames(), ElementsAre("testfont"));
   LayoutObject* container = GetLayoutObjectByElementId("container");
-  EXPECT_TRUE(container->StyleRef()
+  EXPECT_TRUE(container->Style()
                   .GetFont()
-                  .GetFontDescription()
+                  ->GetFontDescription()
                   .Family()
                   .IsPrewarmed());
 }
@@ -181,10 +183,17 @@ TEST_F(LayoutTextTest, PrewarmFamily) {
 TEST_F(LayoutTextTest, PrewarmFontFace) {
   test::ScopedTestFontPrewarmer prewarmer;
   SetBodyInnerHTML(R"HTML(
+    <!--
+      This font was produced by subsetting <roboto regular> to include only the
+      .notdef glyph (GID 0) and 'A' (GID 1, U+0041). The following command was
+      used on the source font:
+      pyftsubset <roboto regular> --unicodes="U+0041" --no-hinting --layout-features='' \
+        --name-IDs='' --drop-tables+=GPOS,GSUB,gasp,GDEF,name,post
+    -->
     <style>
     @font-face {
       font-family: testfont;
-      src: local(Arial);
+      src: url(data:font/ttf;base64,AAEAAAAIAIAAAwAAT1MvMnKqYewAAAFQAAAAYGNtYXAADACUAAABsAAAADRnbHlm9aiJLAAAAIwAAAA4aGVhZPxq0noAAADsAAAANmhoZWEKugWiAAABLAAAACRobXR4CMQAgAAAASQAAAAIbG9jYQAcAAAAAADkAAAABm1heHAAJADlAAAAxAAAACAAAgAcAAAFHQWwAAcACgAAASEDIwEzASMBIQMDzf2eicYCLKgCLcX9TQHv+AF8/oQFsPpQAhoCqQABAAAAAgCPABYAVAAFAAEAAAAAAAAAAAAAAAAABgABAAAAAAAcAAAAAQAAAAIjEpNb+gZfDzz1ABkIAAAAAADE8BEuAAAAANUBUvT6G/3VCTAIcwAAAAkAAgAAAAAAAAOMAGQFOAAcAAEAAAds/gwAAAlJ+hv+SgkwAAEAAAAAAAAAAAAAAAAAAAACAAMEhgGQAAUAAAWaBTMAAAEfBZoFMwAAA9EAZgIAAAACAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAEdPT0cAQABBAEEGAP4AAGYHmgIAAAAAAQAAAAAEOgWwACAAIAADAAAAAgAAAAMAAAAUAAMAAQAAABQABAAgAAAABAAEAAEAAABB//8AAABB////wAABAAAAAA==);
     }
     #container { font-family: testfont; }
     </style>
@@ -192,9 +201,9 @@ TEST_F(LayoutTextTest, PrewarmFontFace) {
   )HTML");
   EXPECT_THAT(prewarmer.PrewarmedFamilyNames(), ElementsAre());
   LayoutObject* container = GetLayoutObjectByElementId("container");
-  EXPECT_FALSE(container->StyleRef()
+  EXPECT_FALSE(container->Style()
                    .GetFont()
-                   .GetFontDescription()
+                   ->GetFontDescription()
                    .Family()
                    .IsPrewarmed());
 }
@@ -210,9 +219,9 @@ TEST_F(LayoutTextTest, PrewarmGenericFamily) {
   // No prewarms because |GenericFontFamilySettings| is empty.
   EXPECT_THAT(prewarmer.PrewarmedFamilyNames(), ElementsAre());
   LayoutObject* container = GetLayoutObjectByElementId("container");
-  EXPECT_TRUE(container->StyleRef()
+  EXPECT_TRUE(container->Style()
                   .GetFont()
-                  .GetFontDescription()
+                  ->GetFontDescription()
                   .Family()
                   .IsPrewarmed());
 }
@@ -800,7 +809,6 @@ TEST_F(LayoutTextTest, PlainTextInPseudo) {
 
   const auto GetPlainText = [](const LayoutObject* parent) {
     const LayoutObject* before = parent->SlowFirstChild();
-    EXPECT_TRUE(before->IsBeforeContent());
     const auto* before_text = To<LayoutText>(before->SlowFirstChild());
     EXPECT_FALSE(before_text->GetNode());
     return before_text->PlainText();
@@ -1125,7 +1133,7 @@ TEST_F(LayoutTextTest, PhysicalLinesBoundingBoxVerticalRL) {
 TEST_F(LayoutTextTest, WordBreakElement) {
   SetBasicBody("foo <wbr> bar");
 
-  const Element* wbr = GetDocument().QuerySelector(AtomicString("wbr"));
+  const Element* wbr = QuerySelector("wbr");
   DCHECK(wbr->GetLayoutObject()->IsText());
   const auto* layout_wbr = To<LayoutText>(wbr->GetLayoutObject());
 
@@ -1680,6 +1688,101 @@ TEST_F(LayoutTextTest, SetTextWithOffsetToEmpty) {
   UpdateAllLifecyclePhasesForTest();
 
   EXPECT_EQ(nullptr, text.GetLayoutObject());
+}
+
+TEST_F(LayoutTextTest, TransformedTextWithCapitalizationAfterInlineAbsolute) {
+  SetBodyInnerHTML(R"HTML(
+    <p style="text-transform: capitalize">
+      h<span style="position: absolute"></span><span id="target">ome</span>
+    </p>
+  )HTML");
+
+  LayoutText* layout_text = GetLayoutTextById("target");
+  String transformed = layout_text->TransformedText();
+
+  EXPECT_EQ(String("ome"), transformed);
+}
+
+TEST_F(LayoutTextTest,
+       TransformedTextWithCapitalizationAfterSupplementaryCharacter) {
+  for (bool fix_enabled : {false, true}) {
+    SCOPED_TRACE(testing::Message() << "fix_enabled=" << fix_enabled);
+    ScopedCapitalizeAfterSupplementaryCharacterFixForTest scoped_fix(
+        fix_enabled);
+    for (bool use_icu : {false, true}) {
+      SCOPED_TRACE(testing::Message() << "use_icu=" << use_icu);
+      ScopedICUCapitalizationForTest scoped_icu(use_icu);
+      // U+1D400 MATHEMATICAL BOLD CAPITAL A is a supplementary letter.
+      SetBodyInnerHTML(
+          "<p style='text-transform: capitalize'>"
+          "&#x1D400;<span id='target'>bc def</span></p>");
+
+      EXPECT_EQ(String(fix_enabled ? "bc Def" : "Bc Def"),
+                GetLayoutTextById("target")->TransformedText());
+    }
+  }
+}
+
+TEST_F(LayoutTextTest, OriginalTextNullWhenTransformedTextIsNonNull) {
+  // Setup CSS pseudo-element which generates a LayoutText without a DOM Text
+  // node
+  SetBodyInnerHTML(R"HTML(
+    <style>
+      #target::after {
+        content: counter(fake-counter-name, disclosure-open);
+      }
+    </style>
+    <div id="target"></div>
+  )HTML");
+
+  // Get the LayoutText from the ::after pseudo-element
+  const Element& target = *GetElementById("target");
+  const Element& after = *target.GetPseudoElement(kPseudoIdAfter);
+  const auto& layout_text =
+      *To<LayoutText>(after.GetLayoutObject()->SlowFirstChild());
+
+  // Check that OriginalText() returns empty string
+  EXPECT_TRUE(layout_text.OriginalText().empty());
+
+  // Check that text_ has content (through TransformedText which accesses it)
+  EXPECT_FALSE(layout_text.TransformedText().empty());
+
+  // Verify we're dealing with a LayoutText that doesn't have a Text node
+  EXPECT_FALSE(DynamicTo<Text>(layout_text.GetNode()));
+}
+
+TEST_F(LayoutTextTest, OriginalTextEmptyWhenTransformedTextIsNonEmpty) {
+  // Setup an unordered list element.
+  SetBodyInnerHTML(R"HTML(
+    <ul>
+      <li id="target">first</li>
+    </ul>
+  )HTML");
+
+  // Get the LayoutText from the ::marker pseudo-element
+  const Element& target = *GetElementById("target");
+  const Element& after = *target.GetPseudoElement(kPseudoIdMarker);
+  const auto& layout_text =
+      *To<LayoutText>(after.GetLayoutObject()->SlowFirstChild());
+
+  // Check that layout_text has content
+  EXPECT_FALSE(layout_text.PlainText().empty());
+
+  // Setup an ordered list element.
+  SetBodyInnerHTML(R"HTML(
+    <ol>
+      <li id="target2">one</li>
+    </ol>
+  )HTML");
+
+  // Get the LayoutText from the ::marker pseudo-element
+  const Element& target2 = *GetElementById("target2");
+  const Element& after2 = *target2.GetPseudoElement(kPseudoIdMarker);
+  const auto& layout_text2 =
+      *To<LayoutText>(after2.GetLayoutObject()->SlowFirstChild());
+
+  // Check that layout_text2 has content
+  EXPECT_FALSE(layout_text2.PlainText().empty());
 }
 
 }  // namespace blink

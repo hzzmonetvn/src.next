@@ -27,8 +27,9 @@
 void DragDownloadItem(const download::DownloadItem* download,
                       const gfx::Image* icon,
                       gfx::NativeView view) {
-  DCHECK(download);
-  DCHECK_EQ(download::DownloadItem::COMPLETE, download->GetState());
+  CHECK(download, base::NotFatalUntil::M161);
+  CHECK_EQ(download::DownloadItem::COMPLETE, download->GetState(),
+           base::NotFatalUntil::M161);
 
   aura::Window* root_window = view->GetRootWindow();
   if (!root_window || !aura::client::GetDragDropClient(root_window))
@@ -46,7 +47,7 @@ void DragDownloadItem(const download::DownloadItem* download,
   file_infos.emplace_back(full_path, download->GetFileNameToReportUser());
   data->SetFilenames(file_infos);
 
-  gfx::Point location = display::Screen::GetScreen()->GetCursorScreenPoint();
+  gfx::Point location = display::Screen::Get()->GetCursorScreenPoint();
 
   // The following call to StartDragAndDrop() causes re-entrancy inside which
   // application tasks must be run (to support dragging downloads into

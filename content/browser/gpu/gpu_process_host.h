@@ -7,7 +7,6 @@
 
 #include <stdint.h>
 
-#include <map>
 #include <memory>
 #include <set>
 #include <string>
@@ -15,7 +14,6 @@
 #include "base/atomicops.h"
 #include "base/functional/callback.h"
 #include "base/location.h"
-#include "base/memory/memory_pressure_listener.h"
 #include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
@@ -54,8 +52,8 @@ class BrowserChildProcessBackgroundedBridge;
 class CATransactionGPUCoordinator;
 #endif
 
-class GpuProcessHost : public BrowserChildProcessHostDelegate,
-                       public viz::GpuHostImpl::Delegate {
+class GpuProcessHost final : public BrowserChildProcessHostDelegate,
+                             public viz::GpuHostImpl::Delegate {
  public:
   static int GetGpuCrashCount();
 
@@ -68,6 +66,11 @@ class GpuProcessHost : public BrowserChildProcessHostDelegate,
   CONTENT_EXPORT static GpuProcessHost* Get(
       GpuProcessKind kind = GPU_PROCESS_KIND_SANDBOXED,
       bool force_create = true);
+
+  // Returns true while the OS is ending the user session (Windows logoff,
+  // shutdown, or restart). During session teardown, Windows kills child
+  // processes and refuses to start new ones, which says nothing about the GPU.
+  CONTENT_EXPORT static bool IsSessionEnding();
 
   GpuProcessHost(const GpuProcessHost&) = delete;
   GpuProcessHost& operator=(const GpuProcessHost&) = delete;
@@ -123,8 +126,6 @@ class GpuProcessHost : public BrowserChildProcessHostDelegate,
   CONTENT_EXPORT viz::mojom::InfoCollectionGpuService*
   info_collection_gpu_service();
 #endif
-
-  CONTENT_EXPORT int GetIDForTesting() const;
 
   viz::GpuHostImpl* gpu_host() { return gpu_host_.get(); }
 
@@ -212,12 +213,6 @@ class GpuProcessHost : public BrowserChildProcessHostDelegate,
 
   void RunServiceImpl(mojo::GenericPendingReceiver receiver);
 
-#if !BUILDFLAG(IS_ANDROID)
-  // Memory pressure handler, called by |memory_pressure_listener_|.
-  void OnMemoryPressure(
-      base::MemoryPressureListener::MemoryPressureLevel level);
-#endif
-
   // The serial number of the GpuProcessHost.
   int host_id_;
 
@@ -237,6 +232,9 @@ class GpuProcessHost : public BrowserChildProcessHostDelegate,
 
   // Whether we actually launched a GPU process.
   bool process_launched_;
+
+  // When the process was successfully launched.
+  base::TimeTicks process_start_time_;
 
   GpuTerminationOrigin termination_origin_ =
       GpuTerminationOrigin::kUnknownOrigin;
@@ -275,12 +273,6 @@ class GpuProcessHost : public BrowserChildProcessHostDelegate,
   // received, assume all of these URLs are guilty, and block
   // automatic execution of 3D content from those domains.
   std::multiset<GURL> urls_with_live_offscreen_contexts_;
-
-#if !BUILDFLAG(IS_ANDROID)
-  // Responsible for forwarding the memory pressure notifications from the
-  // browser process to the GPU process.
-  std::unique_ptr<base::MemoryPressureListener> memory_pressure_listener_;
-#endif
 
   std::unique_ptr<viz::GpuHostImpl> gpu_host_;
 

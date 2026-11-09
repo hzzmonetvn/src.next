@@ -13,8 +13,11 @@
 #include "extensions/browser/lazy_context_task_queue.h"
 #include "extensions/browser/process_manager.h"
 #include "extensions/browser/service_worker/service_worker_task_queue.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/manifest_handlers/background_info.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 namespace devtools_util {
@@ -53,14 +56,14 @@ void InspectServiceWorkerBackgroundHelper(
 void InspectServiceWorkerBackground(const Extension* extension,
                                     Profile* profile,
                                     DevToolsOpenedByAction opened_by) {
-  DCHECK(BackgroundInfo::IsServiceWorkerBased(extension));
+  CHECK(BackgroundInfo::IsServiceWorkerBased(extension),
+        base::NotFatalUntil::M161);
   content::DevToolsAgentHost::List targets =
       content::DevToolsAgentHost::GetOrCreateAll();
   for (const scoped_refptr<content::DevToolsAgentHost>& host : targets) {
     if (host->GetType() == content::DevToolsAgentHost::kTypeServiceWorker &&
         host->GetURL() ==
-            extension->GetResourceURL(
-                BackgroundInfo::GetBackgroundServiceWorkerScript(extension)) &&
+            BackgroundInfo::GetBackgroundServiceWorkerScriptURL(extension) &&
         host->GetBrowserContext() == profile) {
       DevToolsWindow::OpenDevToolsWindow(host, profile, opened_by);
       break;
@@ -71,8 +74,9 @@ void InspectServiceWorkerBackground(const Extension* extension,
 void InspectInactiveServiceWorkerBackground(const Extension* extension,
                                             Profile* profile,
                                             DevToolsOpenedByAction opened_by) {
-  DCHECK(extension);
-  DCHECK(BackgroundInfo::IsServiceWorkerBased(extension));
+  CHECK(extension, base::NotFatalUntil::M161);
+  CHECK(BackgroundInfo::IsServiceWorkerBased(extension),
+        base::NotFatalUntil::M161);
   const auto context_id = LazyContextId::ForExtension(profile, extension);
   context_id.GetTaskQueue()->AddPendingTask(
       context_id,
@@ -82,7 +86,7 @@ void InspectInactiveServiceWorkerBackground(const Extension* extension,
 void InspectBackgroundPage(const Extension* extension,
                            Profile* profile,
                            DevToolsOpenedByAction opened_by) {
-  DCHECK(extension);
+  CHECK(extension, base::NotFatalUntil::M161);
   ExtensionHost* host = ProcessManager::Get(profile)
                             ->GetBackgroundHostForExtension(extension->id());
   if (host) {

@@ -5,11 +5,14 @@
 #include "third_party/blink/renderer/platform/graphics/static_bitmap_image_to_video_frame_copier.h"
 
 #include "base/functional/callback_helpers.h"
+#include "base/numerics/safe_conversions.h"
 #include "base/trace_event/trace_event.h"
 #include "build/build_config.h"
 #include "components/viz/common/resources/shared_image_format_utils.h"
 #include "gpu/command_buffer/client/raster_interface.h"
+#include "gpu/command_buffer/client/shared_image_interface.h"
 #include "gpu/command_buffer/common/capabilities.h"
+#include "gpu/command_buffer/common/shared_image_capabilities.h"
 #include "media/base/video_frame.h"
 #include "media/base/video_util.h"
 #include "third_party/blink/public/platform/web_graphics_context_3d_provider.h"
@@ -37,7 +40,8 @@ StaticBitmapImageToVideoFrameCopier::GetAcceleratedVideoFramePool(
         context_provider) {
   if (accelerated_frame_pool_enabled_ && !accelerated_frame_pool_) {
     accelerated_frame_pool_ =
-        std::make_unique<WebGraphicsContext3DVideoFramePool>(context_provider);
+        std::make_unique<WebGraphicsContext3DVideoFramePool>(
+            context_provider, media::PIXEL_FORMAT_NV12);
   }
   return accelerated_frame_pool_.get();
 }
@@ -49,8 +53,9 @@ void StaticBitmapImageToVideoFrameCopier::Convert(
         context_provider_wrapper,
     FrameReadyCallback callback) {
   can_discard_alpha_ = can_discard_alpha;
-  if (!image)
+  if (!image || !image->IsValid()) {
     return;
+  }
 
   const auto size = image->Size();
   if (!media::VideoFrame::IsValidSize(size, gfx::Rect(size), size)) {
@@ -87,21 +92,17 @@ void StaticBitmapImageToVideoFrameCopier::Convert(
     return;
   }
 
-  auto* context_provider = context_provider_wrapper->ContextProvider();
-  if (!context_provider) {
-    DLOG(ERROR) << "Context lost, skipping frame";
-    return;
-  }
+  auto& context_provider = context_provider_wrapper->ContextProvider();
 
   // Readback to YUV is only used when result is opaque.
-  const bool result_is_opaque =
-      image->CurrentFrameKnownToBeOpaque() || can_discard_alpha_;
+  const bool result_is_opaque = image->IsOpaque() || can_discard_alpha_;
 
   const bool supports_yuv_readback =
-      context_provider->GetCapabilities().supports_yuv_readback;
-  // If supports_rgb_to_yuv_conversion is true, supports_yuv_readback must also
-  // be.
-  CHECK(!context_provider->GetCapabilities().supports_rgb_to_yuv_conversion ||
+      context_provider.GetCapabilities().supports_yuv_readback;
+  // If Skia can render into any YUV format, supports_yuv_readback must also be
+  // true.
+  auto* sii = context_provider.SharedImageInterface();
+  CHECK(!sii || sii->GetCapabilities().skia_writable_yuv_formats.empty() ||
         supports_yuv_readback);
 
   // Try async reading if image is texture backed.
@@ -113,7 +114,7 @@ void StaticBitmapImageToVideoFrameCopier::Convert(
       if (!accelerated_frame_pool_) {
         accelerated_frame_pool_ =
             std::make_unique<WebGraphicsContext3DVideoFramePool>(
-                context_provider_wrapper);
+                context_provider_wrapper, media::PIXEL_FORMAT_NV12);
       }
       if (accelerated_frame_pool_->CopyRGBATextureToVideoFrame(
               gfx::Size(image->width(), image->height()),
@@ -126,10 +127,10 @@ void StaticBitmapImageToVideoFrameCopier::Convert(
         return;
       }
     }
-    ReadYUVPixelsAsync(image, context_provider,
+    ReadYUVPixelsAsync(image, &context_provider,
                        std::move(split_callback.second));
   } else {
-    ReadARGBPixelsAsync(image, context_provider, std::move(callback));
+    ReadARGBPixelsAsync(image, &context_provider, std::move(callback));
   }
 
   TRACE_EVENT1("blink", "StaticBitmapImageToVideoFrameCopier::Convert",
@@ -194,23 +195,25 @@ void StaticBitmapImageToVideoFrameCopier::ReadARGBPixelsAsync(
                 "kRGBA_8888_SkColorType and kBGRA_8888_SkColorType.");
   SkImageInfo info = SkImageInfo::MakeN32(
       image_size.width(), image_size.height(), kUnpremul_SkAlphaType);
-  GrSurfaceOrigin image_origin = image->IsOriginTopLeft()
-                                     ? kTopLeft_GrSurfaceOrigin
-                                     : kBottomLeft_GrSurfaceOrigin;
-
+  auto shared_image = image->GetSharedImage();
+  GrSurfaceOrigin image_origin = shared_image->surface_origin();
   gfx::Point src_point;
-  gpu::MailboxHolder mailbox_holder = image->GetMailboxHolder();
   DCHECK(context_provider->RasterInterface());
-  context_provider->RasterInterface()->WaitSyncTokenCHROMIUM(
-      mailbox_holder.sync_token.GetConstData());
+  std::unique_ptr<gpu::RasterScopedAccess> ri_access =
+      shared_image->BeginRasterAccess(context_provider->RasterInterface(),
+                                      image->GetSyncToken(), /*readonly=*/true);
   context_provider->RasterInterface()->ReadbackARGBPixelsAsync(
-      mailbox_holder.mailbox, mailbox_holder.texture_target, image_origin,
+      shared_image->mailbox(), shared_image->GetTextureTarget(), image_origin,
       image_size, src_point, info,
-      temp_argb_frame->stride(media::VideoFrame::Plane::kARGB),
-      temp_argb_frame->GetWritableVisibleData(media::VideoFrame::Plane::kARGB),
-      WTF::BindOnce(&StaticBitmapImageToVideoFrameCopier::OnARGBPixelsReadAsync,
-                    weak_ptr_factory_.GetWeakPtr(), image, temp_argb_frame,
-                    std::move(callback)));
+      base::checked_cast<GLuint>(
+          temp_argb_frame->stride(media::VideoFrame::Plane::kARGB)),
+      temp_argb_frame->GetWritableVisiblePlaneData(
+          media::VideoFrame::Plane::kARGB),
+      blink::BindOnce(
+          &StaticBitmapImageToVideoFrameCopier::OnARGBPixelsReadAsync,
+          weak_ptr_factory_.GetWeakPtr(), image, temp_argb_frame,
+          std::move(callback)));
+  gpu::RasterScopedAccess::EndAccess(std::move(ri_access));
 }
 
 void StaticBitmapImageToVideoFrameCopier::ReadYUVPixelsAsync(
@@ -232,24 +235,29 @@ void StaticBitmapImageToVideoFrameCopier::ReadYUVPixelsAsync(
     return;
   }
 
-  gpu::MailboxHolder mailbox_holder = image->GetMailboxHolder();
-  context_provider->RasterInterface()->WaitSyncTokenCHROMIUM(
-      mailbox_holder.sync_token.GetConstData());
+  auto shared_image = image->GetSharedImage();
+  std::unique_ptr<gpu::RasterScopedAccess> ri_access =
+      shared_image->BeginRasterAccess(context_provider->RasterInterface(),
+                                      image->GetSyncToken(), /*readonly=*/true);
   context_provider->RasterInterface()->ReadbackYUVPixelsAsync(
-      mailbox_holder.mailbox, mailbox_holder.texture_target, image_size,
-      gfx::Rect(image_size), !image->IsOriginTopLeft(),
-      output_frame->stride(media::VideoFrame::Plane::kY),
-      output_frame->GetWritableVisibleData(media::VideoFrame::Plane::kY),
-      output_frame->stride(media::VideoFrame::Plane::kU),
-      output_frame->GetWritableVisibleData(media::VideoFrame::Plane::kU),
-      output_frame->stride(media::VideoFrame::Plane::kV),
-      output_frame->GetWritableVisibleData(media::VideoFrame::Plane::kV),
-      gfx::Point(0, 0),
-      WTF::BindOnce(&StaticBitmapImageToVideoFrameCopier::OnReleaseMailbox,
-                    weak_ptr_factory_.GetWeakPtr(), image),
-      WTF::BindOnce(&StaticBitmapImageToVideoFrameCopier::OnYUVPixelsReadAsync,
-                    weak_ptr_factory_.GetWeakPtr(), output_frame,
-                    std::move(callback)));
+      shared_image->mailbox(), shared_image->GetTextureTarget(),
+      gfx::Rect(image_size), gfx::Rect(image_size),
+      shared_image->surface_origin() != kTopLeft_GrSurfaceOrigin,
+      base::checked_cast<int>(
+          output_frame->stride(media::VideoFrame::Plane::kY)),
+      output_frame->GetWritableVisiblePlaneData(media::VideoFrame::Plane::kY),
+      base::checked_cast<int>(
+          output_frame->stride(media::VideoFrame::Plane::kU)),
+      output_frame->GetWritableVisiblePlaneData(media::VideoFrame::Plane::kU),
+      base::checked_cast<int>(
+          output_frame->stride(media::VideoFrame::Plane::kV)),
+      output_frame->GetWritableVisiblePlaneData(media::VideoFrame::Plane::kV),
+      blink::BindOnce(&StaticBitmapImageToVideoFrameCopier::OnReleaseMailbox,
+                      weak_ptr_factory_.GetWeakPtr(), image),
+      blink::BindOnce(
+          &StaticBitmapImageToVideoFrameCopier::OnYUVPixelsReadAsync,
+          weak_ptr_factory_.GetWeakPtr(), output_frame, std::move(callback)));
+  gpu::RasterScopedAccess::EndAccess(std::move(ri_access));
 }
 
 void StaticBitmapImageToVideoFrameCopier::OnARGBPixelsReadAsync(

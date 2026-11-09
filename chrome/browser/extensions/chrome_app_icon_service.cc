@@ -6,11 +6,13 @@
 
 #include "base/functional/bind.h"
 #include "base/memory/raw_ptr.h"
-#include "base/not_fatal_until.h"
 #include "base/task/single_thread_task_runner.h"
 #include "build/chromeos_buildflags.h"
 #include "chrome/browser/extensions/chrome_app_icon.h"
 #include "chrome/browser/extensions/chrome_app_icon_service_factory.h"
+#include "extensions/buildflags/buildflags.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -100,9 +102,9 @@ void ChromeAppIconService::OnAppUpdated(const std::string& app_id) {
 }
 
 void ChromeAppIconService::OnIconDestroyed(ChromeAppIcon* icon) {
-  DCHECK(icon);
+  CHECK(icon, base::NotFatalUntil::M161);
   auto it = icon_map_.find(icon->app_id());
-  CHECK(it != icon_map_.end(), base::NotFatalUntil::M130);
+  CHECK(it != icon_map_.end());
   it->second.erase(icon);
   if (it->second.empty()) {
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(

@@ -31,11 +31,11 @@ namespace {
 
 void PostMessageToFrameInternal(
     Page& page,
-    const std::u16string& source_origin,
-    const std::u16string& target_origin,
+    const url::Origin* source_origin,
+    const url::Origin* target_origin,
     const blink::WebMessagePayload& data,
     std::vector<blink::MessagePortDescriptor> ports) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   // TODO(chrisha): Kill off MessagePortChannel, as MessagePortDescriptor now
   // plays that role.
@@ -43,6 +43,13 @@ void PostMessageToFrameInternal(
   for (auto& port : ports)
     channels.emplace_back(MessagePortChannel(std::move(port)));
 
+  // Note that this is reached by every embedder on the platform, not just
+  // WebView -- Chrome Custom Tabs and Trusted Web Activities post through here
+  // too, with a verified source origin -- so nothing here may assume a WebView
+  // renderer on the other end. SharedArrayBuffer payloads are consequently not
+  // deliverable from here at all: the regions backing them can only travel over
+  // a WebView-specific interface, so WebView diverts those messages before they
+  // reach this function.
   blink::TransferableMessage message = blink::EncodeWebMessagePayload(data);
   message.ports = std::move(channels);
   // As the message is posted from the embedder and not from another renderer,
@@ -58,7 +65,7 @@ void PostMessageToFrameInternal(
 
 #if BUILDFLAG(IS_ANDROID)
 std::u16string ToString16(JNIEnv* env,
-                          const base::android::JavaParamRef<jstring>& s) {
+                          const base::android::JavaRef<jstring>& s) {
   if (s.is_null())
     return std::u16string();
   return base::android::ConvertJavaStringToUTF16(env, s);
@@ -70,8 +77,8 @@ std::u16string ToString16(JNIEnv* env,
 // static
 void MessagePortProvider::PostMessageToFrame(
     Page& page,
-    const std::u16string& source_origin,
-    const std::u16string& target_origin,
+    const url::Origin* source_origin,
+    const url::Origin* target_origin,
     const blink::WebMessagePayload& data) {
   PostMessageToFrameInternal(page, source_origin, target_origin, data,
                              std::vector<blink::MessagePortDescriptor>());
@@ -81,12 +88,25 @@ void MessagePortProvider::PostMessageToFrame(
 void MessagePortProvider::PostMessageToFrame(
     Page& page,
     JNIEnv* env,
-    const base::android::JavaParamRef<jstring>& source_origin,
-    const base::android::JavaParamRef<jstring>& target_origin,
-    const base::android::JavaParamRef<jobject>& payload,
-    const base::android::JavaParamRef<jobjectArray>& ports) {
+    const base::android::JavaRef<jstring>& source_origin,
+    const base::android::JavaRef<jstring>& target_origin,
+    const base::android::JavaRef<jobject>& payload,
+    const base::android::JavaRef<jobjectArray>& ports) {
+  std::optional<url::Origin> source;
+  std::u16string serialized_source = ToString16(env, source_origin);
+  if (!serialized_source.empty()) {
+    source = url::Origin::Create(GURL(serialized_source));
+  }
+
+  std::optional<url::Origin> target;
+  std::u16string serialized_target = ToString16(env, target_origin);
+  if (!serialized_target.empty()) {
+    target = url::Origin::Create(GURL(serialized_target));
+  }
+
   PostMessageToFrameInternal(
-      page, ToString16(env, source_origin), ToString16(env, target_origin),
+      page, source.has_value() ? &(*source) : nullptr,
+      target.has_value() ? &(*target) : nullptr,
       android::ConvertToWebMessagePayloadFromJava(
           base::android::ScopedJavaLocalRef<jobject>(payload)),
       android::AppWebMessagePort::Release(env, ports));
@@ -99,8 +119,8 @@ void MessagePortProvider::PostMessageToFrame(
 // static
 void MessagePortProvider::PostMessageToFrame(
     Page& page,
-    const std::u16string& source_origin,
-    const std::optional<std::u16string>& target_origin,
+    const url::Origin* source_origin,
+    const url::Origin* target_origin,
     const std::u16string& data,
     std::vector<blink::WebMessagePort> ports) {
   // Extract the underlying descriptors.
@@ -108,8 +128,7 @@ void MessagePortProvider::PostMessageToFrame(
   descriptors.reserve(ports.size());
   for (size_t i = 0; i < ports.size(); ++i)
     descriptors.push_back(ports[i].PassPort());
-  PostMessageToFrameInternal(page, source_origin,
-                             target_origin.value_or(std::u16string()), data,
+  PostMessageToFrameInternal(page, source_origin, target_origin, data,
                              std::move(descriptors));
 }
 #endif

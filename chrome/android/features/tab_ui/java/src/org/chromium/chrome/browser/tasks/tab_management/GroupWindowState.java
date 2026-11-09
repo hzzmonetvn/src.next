@@ -6,8 +6,12 @@ package org.chromium.chrome.browser.tasks.tab_management;
 
 import androidx.annotation.IntDef;
 
+import org.chromium.build.annotations.NullMarked;
+
+import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
 
 /**
  * State enum to track where a group lives. It can either be in the current tab
@@ -19,18 +23,21 @@ import java.lang.annotation.RetentionPolicy;
  *
  * <p>Emitted to UMA histograms, make sure to update when adding new values.
  */
+// LINT.IfChange(GroupWindowState)
 @IntDef({
     GroupWindowState.IN_CURRENT,
     GroupWindowState.IN_CURRENT_CLOSING,
     GroupWindowState.IN_ANOTHER,
     GroupWindowState.HIDDEN,
-    GroupWindowState.COUNT,
 })
 @Retention(RetentionPolicy.SOURCE)
-@interface GroupWindowState {
+@Target({ElementType.TYPE_USE})
+@NullMarked
+public @interface GroupWindowState {
     int IN_CURRENT = 0;
     int IN_CURRENT_CLOSING = 1;
     int IN_ANOTHER = 2;
     int HIDDEN = 3;
     int COUNT = 4;
 }
+// LINT.ThenChange(//tools/metrics/histograms/metadata/android/enums.xml:GroupWindowState)

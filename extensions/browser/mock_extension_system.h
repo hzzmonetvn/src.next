@@ -5,6 +5,8 @@
 #ifndef EXTENSIONS_BROWSER_MOCK_EXTENSION_SYSTEM_H_
 #define EXTENSIONS_BROWSER_MOCK_EXTENSION_SYSTEM_H_
 
+#include <memory>
+
 #include "base/memory/raw_ptr.h"
 #include "base/one_shot_event.h"
 #include "components/keyed_service/content/browser_context_dependency_manager.h"
@@ -35,6 +37,9 @@ class MockExtensionSystem : public ExtensionSystem {
 
   void SetReady();
 
+  // Sets the StateStore returned by state_store(). By default, it is null.
+  void SetStateStore(std::unique_ptr<StateStore> state_store);
+
   // ExtensionSystem overrides:
   void InitForRegularProfile(bool extensions_enabled) override;
   ExtensionService* extension_service() override;
@@ -50,8 +55,6 @@ class MockExtensionSystem : public ExtensionSystem {
   const base::OneShotEvent& ready() const override;
   bool is_ready() const override;
   ContentVerifier* content_verifier() override;
-  std::unique_ptr<ExtensionSet> GetDependentExtensions(
-      const Extension* extension) override;
   void InstallUpdate(const ExtensionId& extension_id,
                      const std::string& public_key,
                      const base::FilePath& temp_dir,
@@ -59,13 +62,12 @@ class MockExtensionSystem : public ExtensionSystem {
                      InstallUpdateCallback install_update_callback) override;
   void PerformActionBasedOnOmahaAttributes(
       const ExtensionId& extension_id,
-      const base::Value::Dict& attributes) override;
-  bool FinishDelayedInstallationIfReady(const ExtensionId& extension_id,
-                                        bool install_immediately) override;
+      const base::DictValue& attributes) override;
 
  private:
   raw_ptr<content::BrowserContext> browser_context_;
   base::OneShotEvent ready_;
+  std::unique_ptr<StateStore> state_store_;
 };
 
 // A factory to create a MockExtensionSystem. Sample use:

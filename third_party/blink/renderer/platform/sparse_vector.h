@@ -5,6 +5,8 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_SPARSE_VECTOR_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_SPARSE_VECTOR_H_
 
+#include <bit>
+#include <iterator>
 #include <limits>
 #include <type_traits>
 
@@ -74,13 +76,12 @@ class TraceableSparseVectorFields {
 template <typename FieldId,
           typename FieldType,
           wtf_size_t inline_capacity = 0,
-          typename VectorType =
-              std::conditional_t<WTF::IsMemberType<FieldType>::value ||
-                                     WTF::IsTraceable<FieldType>::value,
-                                 HeapVector<FieldType, inline_capacity>,
-                                 Vector<FieldType, inline_capacity>>,
+          typename VectorType = std::conditional_t<
+              IsMemberType<FieldType>::value || IsTraceableV<FieldType>,
+              HeapVector<FieldType, inline_capacity>,
+              Vector<FieldType, inline_capacity>>,
           typename BitfieldType =
-              std::conditional_t<static_cast<unsigned>(FieldId::kNumFields) <=
+              std::conditional_t<static_cast<size_t>(FieldId::kNumFields) <=
                                      std::numeric_limits<uint32_t>::digits,
                                  uint32_t,
                                  uint64_t>>
@@ -89,24 +90,82 @@ class SparseVector :
     // SparseVector<Enum, int> from being treated as traceable by the blinkgc
     // clang plugin. `requires` clause on the `Trace` method doesn't work.
     public std::conditional_t<
-        WTF::IsTraceable<VectorType>::value,
+        IsTraceableV<VectorType>,
         internal::TraceableSparseVectorFields<VectorType>,
         internal::NonTraceableSparseVectorFields<VectorType>> {
   static_assert(std::is_enum_v<FieldId>);
   static_assert(std::is_unsigned_v<BitfieldType>);
-  static_assert(std::numeric_limits<BitfieldType>::digits >=
-                    static_cast<unsigned>(FieldId::kNumFields),
+  static constexpr wtf_size_t kMaxSize =
+      static_cast<wtf_size_t>(FieldId::kNumFields);
+  static_assert(std::numeric_limits<BitfieldType>::digits >= kMaxSize,
                 "BitfieldType must be big enough to have a bit for each "
                 "field in FieldId.");
-  static_assert(inline_capacity <= static_cast<unsigned>(FieldId::kNumFields));
+  static_assert(inline_capacity <= kMaxSize);
 
  public:
+  struct Entry {
+    STACK_ALLOCATED();
+
+   public:
+    FieldId key;
+    const FieldType& value;
+  };
+
+  // Tracks the bits of the fields not yet visited, so the current id is the
+  // lowest set bit. Time complexity is O(1) per step.
+  class ConstIterator {
+    STACK_ALLOCATED();
+
+   public:
+    using iterator_concept = std::forward_iterator_tag;
+    using value_type = Entry;
+    using difference_type = std::ptrdiff_t;
+
+    ConstIterator() = default;
+    ConstIterator(const VectorType* fields,
+                  BitfieldType remaining_bits,
+                  wtf_size_t index)
+        : fields_(fields), remaining_bits_(remaining_bits), index_(index) {}
+
+    Entry operator*() const {
+      return {static_cast<FieldId>(std::countr_zero(remaining_bits_)),
+              (*fields_)[index_]};
+    }
+    ConstIterator& operator++() {
+      // Clear the lowest set bit, which is the current field's.
+      remaining_bits_ &= remaining_bits_ - 1;
+      ++index_;
+      return *this;
+    }
+    ConstIterator operator++(int) {
+      ConstIterator copy = *this;
+      ++*this;
+      return copy;
+    }
+    bool operator==(const ConstIterator& other) const {
+      return index_ == other.index_;
+    }
+
+   private:
+    const VectorType* fields_ = nullptr;
+    BitfieldType remaining_bits_ = 0;
+    wtf_size_t index_ = 0;
+  };
+  using const_iterator = ConstIterator;
+  static_assert(std::forward_iterator<const_iterator>);
+
   wtf_size_t capacity() const { return this->fields_.capacity(); }
   wtf_size_t size() const { return this->fields_.size(); }
   bool empty() const { return this->fields_.empty(); }
+  const_iterator begin() const {
+    return const_iterator(&this->fields_, fields_bitfield_, 0);
+  }
+  const_iterator end() const {
+    return const_iterator(&this->fields_, 0, this->fields_.size());
+  }
 
   void reserve(wtf_size_t capacity) {
-    CHECK_LT(capacity, static_cast<wtf_size_t>(FieldId::kNumFields));
+    CHECK_LE(capacity, kMaxSize);
     this->fields_.reserve(capacity);
   }
 
@@ -118,6 +177,12 @@ class SparseVector :
   // Returns whether the field exists. Time complexity is O(1).
   bool HasField(FieldId field_id) const {
     return fields_bitfield_ & FieldIdMask(field_id);
+  }
+
+  // Returns whether any field between `first` and `last` (both inclusive)
+  // exists. Time complexity is O(1).
+  bool HasFieldInRange(FieldId first, FieldId last) const {
+    return fields_bitfield_ & RangeMask(first, last);
   }
 
   // Returns the value of existing field. Time complexity is O(1).
@@ -155,24 +220,35 @@ class SparseVector :
     return false;
   }
 
+  bool operator==(const SparseVector& other) const {
+    return fields_bitfield_ == other.fields_bitfield_ &&
+           this->fields_ == other.fields_;
+  }
+
  private:
   static BitfieldType FieldIdMask(FieldId field_id) {
-    return static_cast<BitfieldType>(1) << static_cast<unsigned>(field_id);
+    CHECK_LT(static_cast<wtf_size_t>(field_id), kMaxSize);
+    return static_cast<BitfieldType>(1) << static_cast<wtf_size_t>(field_id);
+  }
+
+  // Returns a mask that has entries for all field IDs lower than `upper`.
+  static BitfieldType LowerFieldIdsMask(FieldId upper) {
+    return FieldIdMask(upper) - 1;
+  }
+
+  static BitfieldType RangeMask(FieldId first, FieldId last) {
+    return (FieldIdMask(last) | LowerFieldIdsMask(last)) &
+           ~LowerFieldIdsMask(first);
   }
 
   // Returns the index in `fields_` that `field_id` is stored in. If `fields_`
   // isn't storing a field for `field_id`, then this returns the index which
   // the data for `field_id` should be inserted into.
   wtf_size_t GetFieldIndex(FieldId field_id) const {
-    // First, create a mask that has entries only for field IDs lower than
-    // the field ID we are looking for.
-    const BitfieldType mask =
-        ~(~static_cast<BitfieldType>(0) << static_cast<unsigned>(field_id));
-
     // Then count the total population of field IDs lower than that one we
     // are looking for. The target field ID should be located at the index of
     // of the total population.
-    return __builtin_popcountll(fields_bitfield_ & mask);
+    return std::popcount(fields_bitfield_ & LowerFieldIdsMask(field_id));
   }
 
   BitfieldType fields_bitfield_ = 0;

@@ -31,6 +31,7 @@
 #include "third_party/blink/renderer/platform/graphics/picture_snapshot.h"
 
 #include <memory>
+
 #include "base/time/time.h"
 #include "third_party/blink/renderer/platform/graphics/logging_canvas.h"
 #include "third_party/blink/renderer/platform/graphics/profiling_canvas.h"
@@ -114,14 +115,13 @@ Vector<uint8_t> PictureSnapshot::Replay(unsigned from_step,
   Vector<uint8_t> encoded_image;
 
   SkPixmap src;
-  bool peekResult = bitmap.peekPixels(&src);
-  DCHECK(peekResult);
+  bool peek_result = bitmap.peekPixels(&src);
+  DCHECK(peek_result);
 
-  SkPngEncoder::Options options;
-  options.fFilterFlags = SkPngEncoder::FilterFlag::kSub;
-  options.fZLibLevel = 3;
-  if (!ImageEncoder::Encode(&encoded_image, src, options))
+  if (!ImageEncoder::Encode(&encoded_image, src,
+                            SkPngRustEncoder::CompressionLevel::kLow)) {
     return Vector<uint8_t>();
+  }
 
   return encoded_image;
 }

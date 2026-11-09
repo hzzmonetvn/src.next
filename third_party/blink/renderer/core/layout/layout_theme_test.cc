@@ -11,7 +11,6 @@
 #include "third_party/blink/renderer/core/css/properties/longhands.h"
 #include "third_party/blink/renderer/core/css/style_engine.h"
 #include "third_party/blink/renderer/core/dom/document.h"
-#include "third_party/blink/renderer/core/dom/node_computed_style.h"
 #include "third_party/blink/renderer/core/frame/local_frame_view.h"
 #include "third_party/blink/renderer/core/frame/settings.h"
 #include "third_party/blink/renderer/core/html/html_element.h"
@@ -31,7 +30,8 @@ class LayoutThemeTest : public PageTestBase {
 };
 
 void LayoutThemeTest::SetHtmlInnerHTML(const char* html_content) {
-  GetDocument().documentElement()->setInnerHTML(String::FromUTF8(html_content));
+  GetDocument().documentElement()->SetInnerHTMLWithoutTrustedTypes(
+      String::FromUtf8(html_content));
   UpdateAllLifecyclePhasesForTest();
 }
 
@@ -76,9 +76,62 @@ TEST_F(LayoutThemeTest, ChangeFocusRingColor) {
   EXPECT_EQ(custom_color, OutlineColor(span));
 }
 
+TEST_F(LayoutThemeTest, AppearanceDoesNotAdjustDisplayOfNonWidgets) {
+  ScopedAppearanceDisplayAdjustmentForWidgetsOnlyForTest scoped_feature(true);
+  SetHtmlInnerHTML(R"HTML(
+    <style>
+      #span, #anchor { appearance: button; display: inline; }
+      #item { appearance: auto; display: list-item; }
+    </style>
+    <span id=span>span</span>
+    <a id=anchor>anchor</a>
+    <div id=item>item</div>
+  )HTML");
+
+  EXPECT_EQ(EDisplay::kInline,
+            GetElementById("span")->GetComputedStyle()->Display());
+  EXPECT_EQ(EDisplay::kInline,
+            GetElementById("anchor")->GetComputedStyle()->Display());
+  EXPECT_EQ(EDisplay::kListItem,
+            GetElementById("item")->GetComputedStyle()->Display());
+}
+
+TEST_F(LayoutThemeTest, AppearanceAdjustsDisplayOfWidgets) {
+  ScopedAppearanceDisplayAdjustmentForWidgetsOnlyForTest scoped_feature(true);
+  SetHtmlInnerHTML(R"HTML(
+    <style>
+      #inline_button { display: inline; }
+      /* 'border' makes the effective appearance 'none'. */
+      #cell_button { display: table-cell; border: none; }
+    </style>
+    <button id=inline_button>button</button>
+    <button id=cell_button>button</button>
+  )HTML");
+
+  EXPECT_EQ(EDisplay::kInlineBlock,
+            GetElementById("inline_button")->GetComputedStyle()->Display());
+  EXPECT_EQ(EDisplay::kInlineBlock,
+            GetElementById("cell_button")->GetComputedStyle()->Display());
+}
+
 // The expectations in the tests below are relying on LayoutThemeDefault.
 // LayoutThemeMac doesn't inherit from that class.
 #if !BUILDFLAG(IS_MAC)
+TEST_F(LayoutThemeTest, FocusRingColorWithColorScheme) {
+  const Color custom_color(0x10, 0x10, 0x10);
+  LayoutTheme::GetTheme().SetCustomFocusRingColor(custom_color);
+
+  EXPECT_EQ(custom_color, LayoutTheme::GetTheme().FocusRingColor(
+                              mojom::blink::ColorScheme::kLight));
+  EXPECT_EQ(Color(0xEE, 0xEE, 0xEE), LayoutTheme::GetTheme().FocusRingColor(
+                                         mojom::blink::ColorScheme::kDark));
+
+  ScopedFocusRingRespectExplicitOutlineColorInDarkModeForTest scoped_feature(
+      false);
+  EXPECT_EQ(custom_color, LayoutTheme::GetTheme().FocusRingColor(
+                              mojom::blink::ColorScheme::kDark));
+}
+
 TEST_F(LayoutThemeTest, SystemColorWithColorScheme) {
   SetHtmlInnerHTML(R"HTML(
     <style>
@@ -155,5 +208,16 @@ TEST_F(LayoutThemeTest, SetSelectionColorsNoInvalidation) {
             StyleChangeType::kNoStyleChange);
 }
 #endif  // !BUILDFLAG(IS_MAC)
+
+#if BUILDFLAG(IS_ANDROID)
+TEST_F(LayoutThemeTest, AndroidSelectionColor) {
+  EXPECT_EQ(Color::FromRGBA32(0xFF000000),
+            LayoutTheme::GetTheme().ActiveSelectionForegroundColor(
+                mojom::blink::ColorScheme::kLight));
+  EXPECT_EQ(Color::FromRGBA32(0x6633b5e5),
+            LayoutTheme::GetTheme().ActiveSelectionBackgroundColor(
+                mojom::blink::ColorScheme::kLight));
+}
+#endif  // BUILDFLAG(IS_ANDROID)
 
 }  // namespace blink

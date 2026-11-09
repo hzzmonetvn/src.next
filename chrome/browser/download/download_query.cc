@@ -22,12 +22,12 @@
 #include "base/memory/raw_ref.h"
 #include "base/notreached.h"
 #include "base/strings/string_split.h"
+#include "base/strings/utf_ostream_operators.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/time/time.h"
 #include "base/values.h"
 #include "components/download/public/common/download_item.h"
 #include "components/url_formatter/url_formatter.h"
-#include "content/public/browser/content_browser_client.h"
 #include "third_party/re2/src/re2/re2.h"
 #include "url/gurl.h"
 
@@ -214,7 +214,7 @@ ComparisonType Compare(
   ValueType right_value = accessor.Run(right);
   if (left_value > right_value) return GT;
   if (left_value < right_value) return LT;
-  DCHECK_EQ(left_value, right_value);
+  CHECK_EQ(left_value, right_value, base::NotFatalUntil::M161);
   return EQ;
 }
 
@@ -320,7 +320,7 @@ bool DownloadQuery::MatchesQuery(const std::vector<std::u16string>& query_terms,
 }
 
 DownloadQuery::DownloadQuery() : limit_(std::numeric_limits<uint32_t>::max()) {}
-DownloadQuery::~DownloadQuery() {}
+DownloadQuery::~DownloadQuery() = default;
 
 // AddFilter() pushes a new FilterCallback to filters_. Most FilterCallbacks are
 // Callbacks to FieldMatches<>(). Search() iterates over given DownloadItems,

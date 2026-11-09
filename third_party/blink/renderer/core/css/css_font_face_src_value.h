@@ -26,12 +26,12 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_CSS_CSS_FONT_FACE_SRC_VALUE_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_CSS_CSS_FONT_FACE_SRC_VALUE_H_
 
-#include "base/memory/scoped_refptr.h"
 #include "base/task/single_thread_task_runner.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/css/css_value.h"
 #include "third_party/blink/renderer/core/loader/resource/font_resource.h"
 #include "third_party/blink/renderer/platform/bindings/dom_wrapper_world.h"
+#include "third_party/blink/renderer/platform/heap/collection_support/heap_hash_map.h"
 #include "third_party/blink/renderer/platform/wtf/casting.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
@@ -42,6 +42,7 @@ class CSSURIValue;
 }  // namespace cssvalue
 
 class ExecutionContext;
+class ResourceFetcher;
 
 class CORE_EXPORT CSSFontFaceSrcValue : public CSSValue {
  public:
@@ -57,7 +58,9 @@ class CORE_EXPORT CSSFontFaceSrcValue : public CSSValue {
       : CSSValue(kFontFaceSrcClass), local_resource_(local_resource) {}
   CSSFontFaceSrcValue(cssvalue::CSSURIValue* src_value,
                       const DOMWrapperWorld* world)
-      : CSSValue(kFontFaceSrcClass), src_value_(src_value), world_(world) {}
+      : CSSValue(kFontFaceSrcClass),
+        src_value_(src_value),
+        world_(world && world->IsIsolatedWorld() ? world : nullptr) {}
 
   // Returns the local() resource name. Only usable if IsLocal() returns true.
   const String& LocalResource() const { return local_resource_; }
@@ -69,15 +72,17 @@ class CORE_EXPORT CSSFontFaceSrcValue : public CSSValue {
   void SetFormat(const String& format) { format_ = format; }
 
   /* Only supported technologies need to be listed here, as we can reject other
-   * font face source component values, hence remove SVG and incremental for
-   * now, compare https://drafts.csswg.org/css-fonts-4/#font-face-src-parsing */
+   * font face source component values, hence remove SVG for now, compare
+   * https://drafts.csswg.org/css-fonts-4/#font-face-src-parsing */
   enum class FontTechnology {
+    kTechnologyAvar2,
     kTechnologyFeaturesAAT,
     kTechnologyFeaturesOT,
     kTechnologyCOLRv0,
     kTechnologyCOLRv1,
     kTechnologySBIX,
     kTechnologyCDBT,
+    kTechnologyIncremental,
     kTechnologyVariations,
     kTechnologyPalettes,
     kTechnologyUnknown
@@ -88,7 +93,7 @@ class CORE_EXPORT CSSFontFaceSrcValue : public CSSValue {
 
   String CustomCSSText() const;
 
-  bool HasFailedOrCanceledSubresources() const;
+  bool HasFailedOrCanceledSubresources(ResourceFetcher*) const;
 
   FontResource& Fetch(ExecutionContext*, FontResourceClient*) const;
 
@@ -97,7 +102,7 @@ class CORE_EXPORT CSSFontFaceSrcValue : public CSSValue {
   void TraceAfterDispatch(Visitor* visitor) const;
 
  private:
-  void RestoreCachedResourceIfNeeded(ExecutionContext*) const;
+  void RestoreCachedResourceIfNeeded(ExecutionContext*, FontResource*) const;
 
   Vector<FontTechnology> technologies_;
   Member<cssvalue::CSSURIValue> src_value_;  // Non-null if remote (src()).
@@ -105,6 +110,8 @@ class CORE_EXPORT CSSFontFaceSrcValue : public CSSValue {
   String format_;
   const Member<const DOMWrapperWorld> world_;
   mutable Member<FontResource> fetched_;
+  mutable HeapHashMap<WeakMember<ResourceFetcher>, Member<FontResource>>
+      fetched_resources_;
 };
 
 template <>

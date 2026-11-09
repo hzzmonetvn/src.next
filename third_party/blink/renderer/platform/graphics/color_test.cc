@@ -40,6 +40,49 @@ using ::testing::TestParamInfo;
 using ::testing::TestWithParam;
 using ::testing::ValuesIn;
 
+#define EXPECT_COLOR_NEAR(a, b) EXPECT_PRED_FORMAT2(AssertColorNear, a, b)
+
+bool FloatNear(float a, float b, float abs_error) {
+  return std::abs(a - b) <= abs_error;
+}
+
+::testing::AssertionResult AssertColorNear(const char* lhs_expr,
+                                           const char* rhs_expr,
+                                           const Color& lhs,
+                                           const Color& rhs) {
+  if (lhs == rhs) {
+    return ::testing::AssertionSuccess();
+  }
+  constexpr float kEpsilon = 0.0005f;
+  if (!FloatNear(lhs.Param0(), rhs.Param0(), kEpsilon) ||
+      !FloatNear(lhs.Param1(), rhs.Param1(), kEpsilon) ||
+      !FloatNear(lhs.Param2(), rhs.Param2(), kEpsilon) ||
+      !FloatNear(lhs.Alpha(), rhs.Alpha(), kEpsilon)) {
+    return ::testing::AssertionFailure()
+           << "The component difference between these values:\n"
+           << lhs_expr << "\n    Which is: " << lhs << "\n"
+           << rhs_expr << "\n    Which is: " << rhs << "\nexceeds " << kEpsilon;
+  }
+  if (lhs.GetColorSpace() != rhs.GetColorSpace()) {
+    return ::testing::AssertionFailure()
+           << "Expected equal color spaces for these values:\n"
+           << lhs_expr << "\n    Which is: " << lhs << " color space "
+           << Color::SerializeInterpolationSpace(lhs.GetColorSpace()) << "\n"
+           << rhs_expr << "\n    Which is: " << rhs << " color space "
+           << Color::SerializeInterpolationSpace(rhs.GetColorSpace());
+  }
+  if (lhs.Param0IsNone() != rhs.Param0IsNone() ||
+      lhs.Param1IsNone() != rhs.Param1IsNone() ||
+      lhs.Param2IsNone() != rhs.Param2IsNone() ||
+      lhs.AlphaIsNone() != rhs.AlphaIsNone()) {
+    return ::testing::AssertionFailure()
+           << "Expected the same missing components for these values:\n"
+           << lhs_expr << "\n    Which is: " << lhs << "\n"
+           << rhs_expr << "\n    Which is: " << rhs;
+  }
+  return ::testing::AssertionSuccess();
+}
+
 Color CreateSRGBColor(float r, float g, float b, float a) {
   return Color::FromColorSpace(Color::ColorSpace::kSRGB, r, g, b, a);
 }
@@ -93,9 +136,9 @@ TEST(BlinkColor, ColorMixSameColorSpace) {
         color_mix_test.color_left, color_mix_test.color_right,
         color_mix_test.percentage_right, color_mix_test.alpha_multiplier);
     EXPECT_EQ(result.GetColorSpace(), color_mix_test.mix_space);
-    SkColor4f resultSkColor = result.toSkColor4f();
-    SkColor4f expectedSkColor = color_mix_test.color_expected.toSkColor4f();
-    EXPECT_NEAR(resultSkColor.fR, expectedSkColor.fR, 0.001f)
+    SkColor4f result_sk_color = result.toSkColor4f();
+    SkColor4f expected_sk_color = color_mix_test.color_expected.toSkColor4f();
+    EXPECT_NEAR(result_sk_color.fR, expected_sk_color.fR, 0.001f)
         << "Mixing " << color_mix_test.color_left.toSkColor4f().fR << " "
         << color_mix_test.color_left.toSkColor4f().fG << " "
         << color_mix_test.color_left.toSkColor4f().fB << " "
@@ -104,12 +147,12 @@ TEST(BlinkColor, ColorMixSameColorSpace) {
         << color_mix_test.color_right.toSkColor4f().fG << " "
         << color_mix_test.color_right.toSkColor4f().fB << " "
         << color_mix_test.color_right.toSkColor4f().fA << " produced "
-        << resultSkColor.fR << " " << resultSkColor.fG << " "
-        << resultSkColor.fB << " " << resultSkColor.fA
-        << " and it was expecting " << expectedSkColor.fR << " "
-        << expectedSkColor.fG << " " << expectedSkColor.fB << " "
-        << expectedSkColor.fA;
-    EXPECT_NEAR(resultSkColor.fG, expectedSkColor.fG, 0.001f)
+        << result_sk_color.fR << " " << result_sk_color.fG << " "
+        << result_sk_color.fB << " " << result_sk_color.fA
+        << " and it was expecting " << expected_sk_color.fR << " "
+        << expected_sk_color.fG << " " << expected_sk_color.fB << " "
+        << expected_sk_color.fA;
+    EXPECT_NEAR(result_sk_color.fG, expected_sk_color.fG, 0.001f)
         << "Mixing " << color_mix_test.color_left.toSkColor4f().fR << " "
         << color_mix_test.color_left.toSkColor4f().fG << " "
         << color_mix_test.color_left.toSkColor4f().fB << " "
@@ -118,12 +161,12 @@ TEST(BlinkColor, ColorMixSameColorSpace) {
         << color_mix_test.color_right.toSkColor4f().fG << " "
         << color_mix_test.color_right.toSkColor4f().fB << " "
         << color_mix_test.color_right.toSkColor4f().fA << " produced "
-        << resultSkColor.fR << " " << resultSkColor.fG << " "
-        << resultSkColor.fB << " " << resultSkColor.fA
-        << " and it was expecting " << expectedSkColor.fR << " "
-        << expectedSkColor.fG << " " << expectedSkColor.fB << " "
-        << expectedSkColor.fA;
-    EXPECT_NEAR(resultSkColor.fB, expectedSkColor.fB, 0.001f)
+        << result_sk_color.fR << " " << result_sk_color.fG << " "
+        << result_sk_color.fB << " " << result_sk_color.fA
+        << " and it was expecting " << expected_sk_color.fR << " "
+        << expected_sk_color.fG << " " << expected_sk_color.fB << " "
+        << expected_sk_color.fA;
+    EXPECT_NEAR(result_sk_color.fB, expected_sk_color.fB, 0.001f)
         << "Mixing " << color_mix_test.color_left.toSkColor4f().fR << " "
         << color_mix_test.color_left.toSkColor4f().fG << " "
         << color_mix_test.color_left.toSkColor4f().fB << " "
@@ -132,12 +175,12 @@ TEST(BlinkColor, ColorMixSameColorSpace) {
         << color_mix_test.color_right.toSkColor4f().fG << " "
         << color_mix_test.color_right.toSkColor4f().fB << " "
         << color_mix_test.color_right.toSkColor4f().fA << " produced "
-        << resultSkColor.fR << " " << resultSkColor.fG << " "
-        << resultSkColor.fB << " " << resultSkColor.fA
-        << " and it was expecting " << expectedSkColor.fR << " "
-        << expectedSkColor.fG << " " << expectedSkColor.fB << " "
-        << expectedSkColor.fA;
-    EXPECT_NEAR(resultSkColor.fA, expectedSkColor.fA, 0.001f)
+        << result_sk_color.fR << " " << result_sk_color.fG << " "
+        << result_sk_color.fB << " " << result_sk_color.fA
+        << " and it was expecting " << expected_sk_color.fR << " "
+        << expected_sk_color.fG << " " << expected_sk_color.fB << " "
+        << expected_sk_color.fA;
+    EXPECT_NEAR(result_sk_color.fA, expected_sk_color.fA, 0.001f)
         << "Mixing " << color_mix_test.color_left.toSkColor4f().fR << " "
         << color_mix_test.color_left.toSkColor4f().fG << " "
         << color_mix_test.color_left.toSkColor4f().fB << " "
@@ -146,11 +189,11 @@ TEST(BlinkColor, ColorMixSameColorSpace) {
         << color_mix_test.color_right.toSkColor4f().fG << " "
         << color_mix_test.color_right.toSkColor4f().fB << " "
         << color_mix_test.color_right.toSkColor4f().fA << " produced "
-        << resultSkColor.fR << " " << resultSkColor.fG << " "
-        << resultSkColor.fB << " " << resultSkColor.fA
-        << " and it was expecting " << expectedSkColor.fR << " "
-        << expectedSkColor.fG << " " << expectedSkColor.fB << " "
-        << expectedSkColor.fA;
+        << result_sk_color.fR << " " << result_sk_color.fG << " "
+        << result_sk_color.fB << " " << result_sk_color.fA
+        << " and it was expecting " << expected_sk_color.fR << " "
+        << expected_sk_color.fG << " " << expected_sk_color.fB << " "
+        << expected_sk_color.fA;
   }
 }
 
@@ -368,7 +411,7 @@ TEST(BlinkColor, HueInterpolation) {
     float expected;
   };
 
-  auto HueMethodToString = [](Color::HueInterpolationMethod method) {
+  auto hue_method_to_string = [](Color::HueInterpolationMethod method) {
     switch (method) {
       case Color::HueInterpolationMethod::kShorter:
         return "shorter";
@@ -414,7 +457,7 @@ TEST(BlinkColor, HueInterpolation) {
 
     EXPECT_NEAR(result, hue_test.expected, 0.01f)
         << hue_test.value1 << ' ' << hue_test.value2 << ' '
-        << hue_test.percentage << ' ' << HueMethodToString(hue_test.method)
+        << hue_test.percentage << ' ' << hue_method_to_string(hue_test.method)
         << " produced " << result << " but was expecting " << hue_test.expected;
   }
 }
@@ -766,6 +809,226 @@ TEST(BlinkColor, ConvertToColorSpace) {
   }
 }
 
+TEST(BlinkColor, CarryForwardAnalogousMissingComponents) {
+  struct TestCase {
+    Color::ColorSpace interpolation_space;
+    Color input_color;
+    Color expected_color;
+  };
+
+  // Analogous components:
+  // Category     Components
+  // Reds         r,x
+  // Greens       g,y
+  // Blues        b,z
+  // Lightness    L
+  // Colorfulness C, S
+  // Hue          H
+  // Opponent a   a
+  // Opponent b   b
+  const TestCase tests[] = {
+      {
+          // rgb(none none none) -> xyz(none none none)
+          Color::ColorSpace::kXYZD50,
+          Color::FromColorSpace(Color::ColorSpace::kSRGB, std::nullopt,
+                                std::nullopt, std::nullopt),
+          Color::FromColorSpace(Color::ColorSpace::kXYZD50, std::nullopt,
+                                std::nullopt, std::nullopt),
+      },
+      {
+          // rgb(none 1 2) -> xyz(none ...)
+          Color::ColorSpace::kXYZD50,
+          Color::FromColorSpace(Color::ColorSpace::kSRGB, std::nullopt, 1, 2),
+          Color::FromColorSpace(Color::ColorSpace::kXYZD50, std::nullopt,
+                                1.0171882f, 3.6346194f),
+      },
+      {
+          // rgb(1 none 2) -> xyz(... none ...)
+          Color::ColorSpace::kXYZD50,
+          Color::FromColorSpace(Color::ColorSpace::kSRGB, 1, std::nullopt, 2),
+          Color::FromColorSpace(Color::ColorSpace::kXYZD50, 1.145f,
+                                std::nullopt, 3.551f),
+      },
+      {
+          // rgb(1 2 none) -> xyz(... none)
+          Color::ColorSpace::kXYZD50,
+          Color::FromColorSpace(Color::ColorSpace::kSRGB, 1, 2, std::nullopt),
+          Color::FromColorSpace(Color::ColorSpace::kXYZD50, 2.3440469f,
+                                3.7738409f, std::nullopt),
+      },
+      {
+          // rgb(none none none) -> lch(none none none)
+          Color::ColorSpace::kLch,
+          Color::FromColorSpace(Color::ColorSpace::kSRGB, std::nullopt,
+                                std::nullopt, std::nullopt),
+          Color::FromColorSpace(Color::ColorSpace::kLch, std::nullopt,
+                                std::nullopt, std::nullopt),
+      },
+      {
+          // rgb(none none none) -> lab(none none none)
+          Color::ColorSpace::kLab,
+          Color::FromColorSpace(Color::ColorSpace::kSRGB, std::nullopt,
+                                std::nullopt, std::nullopt),
+          Color::FromColorSpace(Color::ColorSpace::kLab, std::nullopt,
+                                std::nullopt, std::nullopt),
+      },
+      {
+          // rgb(0 0 0) -> lch(0 0 none)
+          Color::ColorSpace::kLch,
+          Color::FromColorSpace(Color::ColorSpace::kSRGB, 0, 0, 0),
+          Color::FromColorSpace(Color::ColorSpace::kLch, 0, 0, std::nullopt),
+      },
+      {
+          // lch(none ...) -> lab(none ...)
+          Color::ColorSpace::kLab,
+          Color::FromColorSpace(Color::ColorSpace::kLch, std::nullopt, 0, 0),
+          Color::FromColorSpace(Color::ColorSpace::kLab, std::nullopt, 0, 0),
+      },
+      {
+          // lch(none none none) -> oklch(none none none)
+          Color::ColorSpace::kOklch,
+          Color::FromColorSpace(Color::ColorSpace::kLch, std::nullopt,
+                                std::nullopt, std::nullopt),
+          Color::FromColorSpace(Color::ColorSpace::kOklch, std::nullopt,
+                                std::nullopt, std::nullopt),
+      },
+      {
+          // lch(none ...) -> oklch(none ...)
+          Color::ColorSpace::kOklch,
+          Color::FromColorSpace(Color::ColorSpace::kLch, std::nullopt, 1, 1),
+          Color::FromColorSpace(Color::ColorSpace::kOklch, std::nullopt, 0.099f,
+                                357.811f),
+      },
+      {
+          // lab(none ...) -> lch(none ...)
+          Color::ColorSpace::kLch,
+          Color::FromColorSpace(Color::ColorSpace::kLab, std::nullopt, 1, 1),
+          Color::FromColorSpace(Color::ColorSpace::kLch, std::nullopt, 1.414f,
+                                45.0f),
+      },
+      {
+          // lab(none none none) -> oklab(none none none)
+          Color::ColorSpace::kOklab,
+          Color::FromColorSpace(Color::ColorSpace::kLab, std::nullopt,
+                                std::nullopt, std::nullopt),
+          Color::FromColorSpace(Color::ColorSpace::kOklab, std::nullopt,
+                                std::nullopt, std::nullopt),
+      },
+      {
+          // lab(none ...) -> oklab(none ...)
+          Color::ColorSpace::kOklab,
+          Color::FromColorSpace(Color::ColorSpace::kLab, std::nullopt, 0, 0),
+          Color::FromColorSpace(Color::ColorSpace::kOklab, std::nullopt, 0, 0),
+      },
+      {
+          // lch(none none none) -> hsl(none none none)
+          Color::ColorSpace::kHSL,
+          Color::FromColorSpace(Color::ColorSpace::kLch, std::nullopt,
+                                std::nullopt, std::nullopt),
+          Color::FromColorSpace(Color::ColorSpace::kHSL, std::nullopt,
+                                std::nullopt, std::nullopt),
+      },
+      {
+          // lch(0 0 none) -> hsl(none 0 0)
+          Color::ColorSpace::kHSL,
+          Color::FromColorSpace(Color::ColorSpace::kLch, 0, 0, std::nullopt),
+          Color::FromColorSpace(Color::ColorSpace::kHSL, std::nullopt, 0, 0),
+      },
+      {
+          // lch(none 1 1) -> hsl(... none)
+          Color::ColorSpace::kHSL,
+          Color::FromColorSpace(Color::ColorSpace::kLch, std::nullopt, 1, 1),
+          Color::FromColorSpace(Color::ColorSpace::kHSL, 345.488f, 1.902f,
+                                std::nullopt),
+      },
+      {
+          // lch(1 none 1) -> hsl(... none ...)
+          Color::ColorSpace::kHSL,
+          Color::FromColorSpace(Color::ColorSpace::kLch, 1, std::nullopt, 1),
+          Color::FromColorSpace(Color::ColorSpace::kHSL, 161.869f, std::nullopt,
+                                0.0143f),
+      },
+      {
+          // lch(none 1 1) -> hsl(... none)
+          Color::ColorSpace::kHSL,
+          Color::FromColorSpace(Color::ColorSpace::kLch, std::nullopt, 1, 1),
+          Color::FromColorSpace(Color::ColorSpace::kHSL, 345.488f, 1.902f,
+                                std::nullopt),
+      },
+      {
+          // lch(none 0 0) -> hsl(none 0 none)
+          Color::ColorSpace::kHSL,
+          Color::FromColorSpace(Color::ColorSpace::kLch, std::nullopt, 0, 0),
+          Color::FromColorSpace(Color::ColorSpace::kHSL, std::nullopt, 0,
+                                std::nullopt),
+      },
+      {
+          // hsl(none none 0) -> hwb(none ...)
+          Color::ColorSpace::kHWB,
+          Color::FromColorSpace(Color::ColorSpace::kHSL, std::nullopt,
+                                std::nullopt, 0),
+          Color::FromColorSpace(Color::ColorSpace::kHWB, std::nullopt, 0, 1),
+      },
+      {
+          // hsl(none 0 none) -> lab(none ...)
+          Color::ColorSpace::kLab,
+          Color::FromColorSpace(Color::ColorSpace::kHSL, std::nullopt, 0,
+                                std::nullopt),
+          Color::FromColorSpace(Color::ColorSpace::kLab, std::nullopt, 0, 0),
+      },
+      {
+          // hsl(none none none) -> lch(none none none)
+          Color::ColorSpace::kLch,
+          Color::FromColorSpace(Color::ColorSpace::kHSL, std::nullopt,
+                                std::nullopt, std::nullopt),
+          Color::FromColorSpace(Color::ColorSpace::kLch, std::nullopt,
+                                std::nullopt, std::nullopt),
+      },
+      {
+          // hsl(none none 1) -> lch(... none none)
+          Color::ColorSpace::kLch,
+          Color::FromColorSpace(Color::ColorSpace::kHSL, std::nullopt,
+                                std::nullopt, 1),
+          Color::FromColorSpace(Color::ColorSpace::kLch, 99.999f, std::nullopt,
+                                std::nullopt),
+      },
+      {
+          // hsl(0 none 1) -> lch(... none none)
+          Color::ColorSpace::kLch,
+          Color::FromColorSpace(Color::ColorSpace::kHSL, 0, std::nullopt, 1),
+          Color::FromColorSpace(Color::ColorSpace::kLch, 99.999f, std::nullopt,
+                                std::nullopt),
+      },
+      {
+          // hwb(none none 0) -> hsl(none ...)
+          Color::ColorSpace::kHSL,
+          Color::FromColorSpace(Color::ColorSpace::kHWB, std::nullopt,
+                                std::nullopt, 0),
+          Color::FromColorSpace(Color::ColorSpace::kHSL, std::nullopt, 1, 0.5f),
+      },
+      {
+          // hwb(none none 1) -> lch(... none)
+          Color::ColorSpace::kLch,
+          Color::FromColorSpace(Color::ColorSpace::kHWB, std::nullopt,
+                                std::nullopt, 1),
+          Color::FromColorSpace(Color::ColorSpace::kLch, 0, 0, std::nullopt),
+      },
+      {
+          // hwb(none 1 0) -> rgb(...)
+          Color::ColorSpace::kSRGB,
+          Color::FromColorSpace(Color::ColorSpace::kHWB, std::nullopt, 1, 0),
+          Color::FromColorSpace(Color::ColorSpace::kSRGB, 1, 1, 1),
+      },
+  };
+
+  for (const auto& test : tests) {
+    const Color result =
+        Color::InterpolateColors(test.interpolation_space, std::nullopt,
+                                 test.input_color, test.input_color, 0);
+    EXPECT_COLOR_NEAR(result, test.expected_color);
+  }
+}
+
 TEST(BlinkColor, ResolveMissingComponents) {
   struct ResolveMissingComponentsTest {
     Color input_color;
@@ -903,4 +1166,17 @@ TEST(BlinkColor, SubstituteMissingParameters) {
     EXPECT_FALSE(Color::SubstituteMissingParameters(c1, c2));
   }
 }
+
+TEST(BlinkColor, Blend) {
+  // Small alpha (yields 0 from AlphaAsInteger()).
+  constexpr float kSmallAlpha = 0.0018f;
+  const Color color = Color::FromRGBAFloat(0, 0, 0, kSmallAlpha);
+  const Color result = color.Blend(color);
+  EXPECT_EQ(kSmallAlpha * (1.0f - kSmallAlpha) + kSmallAlpha, result.Alpha());
+  EXPECT_EQ(Color::ColorSpace::kSRGBLegacy, result.GetColorSpace());
+  EXPECT_EQ(0, result.Param0());
+  EXPECT_EQ(0, result.Param1());
+  EXPECT_EQ(0, result.Param2());
+}
+
 }  // namespace blink

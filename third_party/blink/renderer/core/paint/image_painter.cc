@@ -4,6 +4,9 @@
 
 #include "third_party/blink/renderer/core/paint/image_painter.h"
 
+#include "third_party/blink/renderer/core/animation/css/css_image_animations.h"
+#include "third_party/blink/renderer/core/css/properties/longhands.h"
+#include "third_party/blink/renderer/core/display_lock/display_lock_utilities.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/element.h"
 #include "third_party/blink/renderer/core/editing/frame_selection.h"
@@ -11,7 +14,6 @@
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/html/html_area_element.h"
 #include "third_party/blink/renderer/core/html/html_image_element.h"
-#include "third_party/blink/renderer/core/html/media/html_video_element.h"
 #include "third_party/blink/renderer/core/inspector/inspector_trace_events.h"
 #include "third_party/blink/renderer/core/layout/adjust_for_absolute_zoom.h"
 #include "third_party/blink/renderer/core/layout/layout_image.h"
@@ -23,34 +25,35 @@
 #include "third_party/blink/renderer/core/paint/paint_auto_dark_mode.h"
 #include "third_party/blink/renderer/core/paint/paint_info.h"
 #include "third_party/blink/renderer/core/paint/scoped_paint_state.h"
-#include "third_party/blink/renderer/core/paint/timing/image_element_timing.h"
 #include "third_party/blink/renderer/core/paint/timing/paint_timing_detector.h"
+#include "third_party/blink/renderer/platform/geometry/path.h"
+#include "third_party/blink/renderer/platform/geometry/path_builder.h"
+#include "third_party/blink/renderer/platform/graphics/color.h"
 #include "third_party/blink/renderer/platform/graphics/graphics_context.h"
+#include "third_party/blink/renderer/platform/graphics/image_node_animation_info.h"
 #include "third_party/blink/renderer/platform/graphics/paint/display_item_cache_skipper.h"
 #include "third_party/blink/renderer/platform/graphics/paint/drawing_recorder.h"
-#include "third_party/blink/renderer/platform/graphics/path.h"
 #include "third_party/blink/renderer/platform/graphics/scoped_image_rendering_settings.h"
 #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 
 namespace blink {
 namespace {
 
-ImagePaintTimingInfo ComputeImagePaintTimingInfo(
+ReportPaintTiming ComputeReportPaintTiming(
     const LayoutImage& layout_image,
     const Image& image,
     const ImageResourceContent* image_content,
     const GraphicsContext& context,
     const gfx::Rect& image_border) {
-  // |report_paint_timing| for ImagePaintTimingInfo is set to false since we
-  // expect all images to be contentful and non-generated
+  // Returns `ReportPaintTiming::kDoNotReport` since we expect all images to be
+  // contentful and non-generated.
   if (!image_content) {
-    return ImagePaintTimingInfo(/* image_may_be_lcp_candidate */ false,
-                                /* report_paint_timing */ false);
+    return ReportPaintTiming::kDoNotReport;
   }
-  return ImagePaintTimingInfo(PaintTimingDetector::NotifyImagePaint(
+  PaintTimingDetector::NotifyImagePaint(
       layout_image, image.Size(), *image_content,
-      context.GetPaintController().CurrentPaintChunkProperties(),
-      image_border));
+      context.GetPaintController().CurrentPaintChunkProperties(), image_border);
+  return ReportPaintTiming::kReport;
 }
 
 }  // namespace
@@ -76,21 +79,30 @@ void ImagePainter::PaintAreaElementFocusRing(const PaintInfo& paint_info) {
   if (area_element->ImageElement() != layout_image_.GetNode())
     return;
 
-  // We use EnsureComputedStyle() instead of GetComputedStyle() here because
-  // <area> is used and its style applied even if it has display:none.
-  const ComputedStyle* area_element_style = area_element->EnsureComputedStyle();
-  // If the outline width is 0 we want to avoid drawing anything even if we
-  // don't use the value directly.
-  if (!area_element_style->OutlineWidth())
+  // Don't paint or force style computation for <area> elements inside
+  // a display-locked subtree.
+  if (DisplayLockUtilities::IsDisplayLockedPreventingPaint(
+          area_element, /*inclusive_check=*/true)) {
     return;
+  }
 
-  Path path = area_element->GetPath(&layout_image_);
-  if (path.IsEmpty())
+  // We use EnsureComputedStyle() instead of GetComputedStyle() here because
+  // <area> is used and its style applied even if it has display:none. The style
+  // may still be null if the area_element is outside the flat tree.
+  const ComputedStyle* area_element_style = area_element->EnsureComputedStyle();
+  // If the outline is hidden we want to avoid drawing anything even if we
+  // don't use the value directly.
+  if (!area_element_style || !area_element_style->HasOutline()) {
     return;
+  }
 
   ScopedPaintState paint_state(layout_image_, paint_info);
-  auto paint_offset = paint_state.PaintOffset();
-  path.Translate(gfx::Vector2dF(paint_offset));
+  const auto paint_offset = paint_state.PaintOffset();
+
+  const Path path =
+      area_element->GetPath(&layout_image_, gfx::Vector2dF(paint_offset));
+  if (path.IsEmpty())
+    return;
 
   if (DrawingRecorder::UseCachedDrawingIfPossible(
           paint_info.context, layout_image_, DisplayItem::kImageAreaFocusRing))
@@ -106,32 +118,41 @@ void ImagePainter::PaintAreaElementFocusRing(const PaintInfo& paint_info) {
   PhysicalRect focus_rect = layout_image_.PhysicalContentBoxRect();
   focus_rect.Move(paint_offset);
   paint_info.context.Clip(ToPixelSnappedRect(focus_rect));
+  const auto& outline_color_property = GetCSSPropertyOutlineColor();
+  const Color outline_color =
+      paint_info.IsReadBackAllowedRendering()
+          ? outline_color_property.ColorIncludingFallback(
+                /*visited_link=*/false, *area_element_style,
+                /*is_current_color=*/nullptr)
+          : area_element_style->VisitedDependentColor(outline_color_property);
   OutlinePainter::PaintFocusRingPath(paint_info.context, path,
-                                     *area_element_style);
+                                     *area_element_style, outline_color);
   paint_info.context.Restore();
 }
 
 void ImagePainter::PaintReplaced(const PaintInfo& paint_info,
                                  const PhysicalOffset& paint_offset) {
-  const PhysicalSize content_size = layout_image_.PhysicalContentBoxSize();
+  const PhysicalRect content_rect =
+      layout_image_.PhysicalContentBoxRect() + paint_offset;
   bool has_image = layout_image_.ImageResource()->HasImage();
-
   if (has_image) {
-    if (content_size.IsEmpty())
+    if (content_rect.IsEmpty()) {
       return;
+    }
+    if (paint_info.IsReadBackAllowedRendering() &&
+        !layout_image_.ImageResource()->IsCorsSameOrigin()) {
+      return;
+    }
   } else {
     if (paint_info.phase == PaintPhase::kSelectionDragImage)
       return;
-    if (content_size.width <= 2 || content_size.height <= 2) {
+    if (content_rect.size.width <= 2 || content_rect.size.height <= 2) {
       return;
     }
   }
 
-  PhysicalRect content_rect(
-      paint_offset + layout_image_.PhysicalContentBoxOffset(), content_size);
-
-  PhysicalRect paint_rect = layout_image_.ReplacedContentRect();
-  paint_rect.offset += paint_offset;
+  const PhysicalRect paint_rect =
+      layout_image_.ReplacedContentRect() + paint_offset;
 
   // If |overflow| is supported for replaced elements, paint the complete image
   // and the painting will be clipped based on overflow value by clip paint
@@ -163,16 +184,18 @@ void ImagePainter::PaintReplaced(const PaintInfo& paint_info,
 
   GraphicsContext& context = paint_info.context;
   if (DrawingRecorder::UseCachedDrawingIfPossible(context, layout_image_,
-                                                  paint_info.phase))
+                                                  paint_info.phase)) {
     return;
+  }
 
   // Disable cache in under-invalidation checking mode for animated image
   // because it may change before it's actually invalidated.
   std::optional<DisplayItemCacheSkipper> cache_skipper;
   if (RuntimeEnabledFeatures::PaintUnderInvalidationCheckingEnabled() &&
       layout_image_.ImageResource() &&
-      layout_image_.ImageResource()->MaybeAnimated())
+      layout_image_.ImageResource()->MaybeAnimated()) {
     cache_skipper.emplace(context);
+  }
 
   if (!has_image) {
     // Draw an outline rect where the image should be.
@@ -183,7 +206,7 @@ void ImagePainter::PaintReplaced(const PaintInfo& paint_info,
     gfx::RectF outline_rect(ToPixelSnappedRect(content_rect));
     outline_rect.Inset(0.5f);
     context.StrokeRect(outline_rect,
-                       PaintAutoDarkMode(layout_image_.StyleRef(),
+                       PaintAutoDarkMode(layout_image_.Style(),
                                          DarkModeFilter::ElementRole::kBorder));
     return;
   }
@@ -242,8 +265,8 @@ void ImagePainter::PaintIntoRect(GraphicsContext& context,
       gfx::RectF(dest_rect));
 
   ScopedImageRenderingSettings image_rendering_settings_scope(
-      context, layout_image_.StyleRef().GetInterpolationQuality(),
-      layout_image_.StyleRef().GetDynamicRangeLimit());
+      context, layout_image_.Style().GetInterpolationQuality(),
+      layout_image_.Style().GetDynamicRangeLimit());
 
   Node* node = layout_image_.GetNode();
   auto* image_element = DynamicTo<HTMLImageElement>(node);
@@ -253,30 +276,23 @@ void ImagePainter::PaintIntoRect(GraphicsContext& context,
           : Image::kUnspecifiedDecode;
 
   auto image_auto_dark_mode = ImageClassifierHelper::GetImageAutoDarkMode(
-      *layout_image_.GetFrame(), layout_image_.StyleRef(),
+      *layout_image_.GetFrame(), layout_image_.Style(),
       gfx::RectF(pixel_snapped_dest_rect), src_rect);
 
   // At this point we have all the necessary information to report paint
   // timing data. Do so now in order to mark the resulting PaintImage as
   // an LCP candidate.
   ImageResourceContent* image_content = image_resource.CachedImage();
-  if (image_content &&
-      (IsA<HTMLImageElement>(node) || IsA<HTMLVideoElement>(node)) &&
-      image_content->IsLoaded()) {
-    LocalDOMWindow* window = layout_image_.GetDocument().domWindow();
-    DCHECK(window);
-    ImageElementTiming::From(*window).NotifyImagePainted(
-        layout_image_, *image_content,
-        context.GetPaintController().CurrentPaintChunkProperties(),
-        pixel_snapped_dest_rect);
-  }
-
+  ImageNodeAnimationInfo image_animation =
+      CSSImageAnimations::CreateImageNodeAnimationInfo(
+          node, image_content, layout_image_.Style().ImageAnimation());
   context.DrawImage(
       *image, decode_mode, image_auto_dark_mode,
-      ComputeImagePaintTimingInfo(layout_image_, *image, image_content, context,
-                                  pixel_snapped_dest_rect),
+      ComputeReportPaintTiming(layout_image_, *image, image_content, context,
+                               pixel_snapped_dest_rect),
       gfx::RectF(pixel_snapped_dest_rect), &src_rect, SkBlendMode::kSrcOver,
-      respect_orientation);
+      respect_orientation, Image::ImageClampingMode::kClampImageToSourceRect,
+      &image_animation);
 }
 
 }  // namespace blink

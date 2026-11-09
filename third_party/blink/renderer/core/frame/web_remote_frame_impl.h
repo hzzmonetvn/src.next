@@ -42,7 +42,13 @@ class CORE_EXPORT WebRemoteFrameImpl final
       mojo::PendingAssociatedReceiver<mojom::blink::RemoteFrame> receiver,
       mojom::blink::FrameReplicationStatePtr replicated_state);
 
-  static WebRemoteFrameImpl* CreateForFencedFrame(
+  // Creates a placeholder RemoteFrame owned by `frame_owner` in the embedder's
+  // renderer process to represent an embedded MPArch FrameTree (e.g.
+  // <persistentwidget>). The returned RemoteFrame connects to the outer
+  // delegate RenderFrameProxyHost in the browser process for layout,
+  // compositing, and input routing, but is initialized with a null parent so
+  // it is not added to the embedder's blink::FrameTree (e.g. window.frames).
+  static WebRemoteFrameImpl* CreatePlaceholderForEmbeddedFrameTree(
       mojom::blink::TreeScopeType,
       const RemoteFrameToken& frame_token,
       const base::UnguessableToken& devtools_frame_token,
@@ -72,6 +78,7 @@ class CORE_EXPORT WebRemoteFrameImpl final
       const LocalFrameToken& frame_token,
       WebFrame* opener,
       const DocumentToken& document_token,
+      const InitiatorStateToken& initiator_state_token,
       CrossVariantMojoRemote<mojom::BrowserInterfaceBrokerInterfaceBase>,
       std::unique_ptr<blink::WebPolicyContainer> policy_container) override;
   void SetReplicatedOrigin(
@@ -144,7 +151,7 @@ class CORE_EXPORT WebRemoteFrameImpl final
   // Oilpan: WebRemoteFrameImpl must remain alive until close() is called.
   // Accomplish that by keeping a self-referential Persistent<>. It is
   // cleared upon close().
-  SelfKeepAlive<WebRemoteFrameImpl> self_keep_alive_{this};
+  SelfKeepAlive<WebRemoteFrameImpl> self_keep_alive_{{}, this};
 };
 
 template <>

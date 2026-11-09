@@ -34,14 +34,20 @@ inline constexpr char kPopularSitesURLPref[] = "popular_sites_url";
 inline constexpr char kPopularSitesJsonPref[] = "suggested_sites_json";
 inline constexpr char kPopularSitesVersionPref[] = "suggested_sites_version";
 
-// Prefs used to cache custom links.
-inline constexpr char kCustomLinksList[] = "custom_links.list";
-inline constexpr char kCustomLinksInitialized[] = "custom_links.initialized";
+// The pref that stores if the Tab Resumption Home Module is enabled.
+inline constexpr char kTabResumptionHomeModuleEnabled[] =
+    "home.module.tab_resumption.enabled";
 
-// Pref used to verify whether custom links have been removed
-// for preinstalled default chrome apps
-inline constexpr char kCustomLinksForPreinstalledAppsRemoved[] =
-    "custom_links.preinstalledremoved";
+// The pref that stores if the Tips Home Module is enabled.
+inline constexpr char kTipsHomeModuleEnabled[] = "home.module.tips.enabled";
+
+// Stores if the Magic Stack Home Module (i.e. cards on the NTP) is enabled.
+inline constexpr char kMagicStackHomeModuleEnabled[] =
+    "home.module.magic_stack.enabled";
+
+// The pref that stores if the Most Visited Tiles Home Module is enabled.
+inline constexpr char kMostVisitedHomeModuleEnabled[] =
+    "home.module.most_visited.enabled";
 
 }  // namespace ntp_tiles::prefs
 

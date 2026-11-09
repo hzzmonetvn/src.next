@@ -23,7 +23,7 @@ void ObjectPainter::PaintOutline(const PaintInfo& paint_info,
                                  const PhysicalOffset& paint_offset) {
   DCHECK(ShouldPaintSelfOutline(paint_info.phase));
 
-  const ComputedStyle& style_to_use = layout_object_.StyleRef();
+  const ComputedStyle& style_to_use = layout_object_.Style();
   if (!style_to_use.HasOutline() ||
       style_to_use.Visibility() != EVisibility::kVisible) {
     return;
@@ -45,7 +45,7 @@ void ObjectPainter::PaintOutline(const PaintInfo& paint_info,
     return;
 
   OutlinePainter::PaintOutlineRects(paint_info, layout_object_, outline_rects,
-                                    info, style_to_use);
+                                    info, style_to_use, &layout_object_);
 }
 
 void ObjectPainter::PaintInlineChildrenOutlines(const PaintInfo& paint_info) {
@@ -64,7 +64,7 @@ void ObjectPainter::AddURLRectIfNeeded(const PaintInfo& paint_info,
                                        const PhysicalOffset& paint_offset) {
   DCHECK(paint_info.ShouldAddUrlMetadata());
   if (!layout_object_.GetNode() || !layout_object_.GetNode()->IsLink() ||
-      layout_object_.StyleRef().Visibility() != EVisibility::kVisible) {
+      layout_object_.Style().Visibility() != EVisibility::kVisible) {
     return;
   }
 
@@ -124,8 +124,10 @@ void ObjectPainter::PaintAllPhasesAtomically(const PaintInfo& paint_info) {
   PaintInfo info(paint_info);
   info.phase = PaintPhase::kBlockBackground;
   layout_object_.Paint(info);
-  info.phase = PaintPhase::kForcedColorsModeBackplate;
-  layout_object_.Paint(info);
+  if (layout_object_.GetDocument().InForcedColorsMode()) {
+    info.phase = PaintPhase::kForcedColorsModeBackplate;
+    layout_object_.Paint(info);
+  }
   info.phase = PaintPhase::kFloat;
   layout_object_.Paint(info);
   info.phase = PaintPhase::kForeground;
@@ -138,14 +140,6 @@ void ObjectPainter::RecordHitTestData(
     const PaintInfo& paint_info,
     const gfx::Rect& paint_rect,
     const DisplayItemClient& background_client) {
-  // When HitTestOpaqueness is not enabled, we only need to record hit test
-  // data for scrolling background when there are special hit test data.
-  if (!RuntimeEnabledFeatures::HitTestOpaquenessEnabled() &&
-      paint_info.IsPaintingBackgroundInContentsSpace() &&
-      !ShouldRecordSpecialHitTestData(paint_info)) {
-    return;
-  }
-
   // Hit test data are only needed for compositing. This flag is used for for
   // printing and drag images which do not need hit testing.
   if (paint_info.ShouldOmitCompositingInfo()) {
@@ -155,7 +149,7 @@ void ObjectPainter::RecordHitTestData(
   // If an object is not visible, it does not participate in painting or hit
   // testing. TODO(crbug.com/1471738): Some pointer-events values actually
   // allow hit testing with visibility:hidden.
-  if (layout_object_.StyleRef().Visibility() != EVisibility::kVisible) {
+  if (layout_object_.Style().Visibility() != EVisibility::kVisible) {
     return;
   }
 
@@ -166,10 +160,6 @@ void ObjectPainter::RecordHitTestData(
 }
 
 cc::HitTestOpaqueness ObjectPainter::GetHitTestOpaqueness() const {
-  if (!RuntimeEnabledFeatures::HitTestOpaquenessEnabled()) {
-    return cc::HitTestOpaqueness::kMixed;
-  }
-
   // Effects (e.g. clip-path and mask) are not checked here even if they
   // affects hit test. They are checked during PaintArtifactCompositor update
   // based on paint properties.
@@ -180,7 +170,7 @@ cc::HitTestOpaqueness ObjectPainter::GetHitTestOpaqueness() const {
   }
   // Border radius is not considered opaque for hit test because the hit
   // test may be inside or outside of the rounded corner.
-  if (layout_object_.StyleRef().HasBorderRadius()) {
+  if (layout_object_.Style().HasBorderRadius()) {
     return cc::HitTestOpaqueness::kMixed;
   }
   // SVG children are not considered opaque for hit test because SVG has
@@ -200,18 +190,15 @@ bool ObjectPainter::ShouldRecordSpecialHitTestData(
   if (layout_object_.InsideBlockingWheelEventHandler()) {
     return true;
   }
-  if (RuntimeEnabledFeatures::HitTestOpaquenessEnabled()) {
-    if (layout_object_.StyleRef().UsedPointerEvents() ==
-        EPointerEvents::kNone) {
-      return true;
-    }
-    if (paint_info.context.GetPaintController()
-            .CurrentChunkIsNonEmptyAndTransparentToHitTest()) {
-      // A non-none value of pointer-events will make a transparent paint chunk
-      // (due to pointer-events: none on an ancestor painted into the current
-      // paint chunk) not transparent.
-      return true;
-    }
+  if (layout_object_.Style().UsedPointerEvents() == EPointerEvents::kNone) {
+    return true;
+  }
+  if (paint_info.context.GetPaintController()
+          .CurrentChunkIsNonEmptyAndTransparentToHitTest()) {
+    // A non-none value of pointer-events will make a transparent paint chunk
+    // (due to pointer-events: none on an ancestor painted into the current
+    // paint chunk) not transparent.
+    return true;
   }
   return false;
 }

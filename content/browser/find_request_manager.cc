@@ -4,13 +4,13 @@
 
 #include "content/browser/find_request_manager.h"
 
+#include <algorithm>
 #include <utility>
 
-#include "base/containers/contains.h"
 #include "base/containers/queue.h"
 #include "base/functional/bind.h"
 #include "base/memory/raw_ptr.h"
-#include "base/ranges/algorithm.h"
+#include "base/notimplemented.h"
 #include "base/task/single_thread_task_runner.h"
 #include "build/build_config.h"
 #include "content/browser/find_in_page_client.h"
@@ -83,16 +83,12 @@ RenderFrameHostImpl* GetAncestor(RenderFrameHostImpl* rfh) {
 }
 
 // Returns the previous sibling RenderFrameHostImpl of |rfh|, if one exists,
-// or nullptr otherwise.
+// or nullptr otherwise. Siblings come from GetChildren() so that an inner
+// WebContents is its main frame here too, not its outer delegate frame.
 RenderFrameHostImpl* GetPreviousSibling(RenderFrameHostImpl* rfh) {
-  if (rfh->PreviousSibling()) {
-    return rfh->PreviousSibling()->current_frame_host();
-  }
-
-  // The previous sibling may be in another WebContents.
   if (RenderFrameHostImpl* parent = GetAncestor(rfh)) {
     auto children = GetChildren(parent);
-    auto it = base::ranges::find(children, rfh);
+    auto it = std::ranges::find(children, rfh);
     // It is odd that this rfh may not be a child of its parent, but this is
     // actually possible during teardown, hence the need for the check for
     // "it != children.end()".
@@ -104,15 +100,11 @@ RenderFrameHostImpl* GetPreviousSibling(RenderFrameHostImpl* rfh) {
 }
 
 // Returns the next sibling RenderFrameHostImpl of |rfh|, if one exists, or
-// nullptr otherwise.
+// nullptr otherwise. See GetPreviousSibling().
 RenderFrameHostImpl* GetNextSibling(RenderFrameHostImpl* rfh) {
-  if (rfh->NextSibling())
-    return rfh->NextSibling()->current_frame_host();
-
-  // The next sibling may be in another WebContents.
   if (RenderFrameHostImpl* parent = GetAncestor(rfh)) {
     auto children = GetChildren(parent);
-    auto it = base::ranges::find(children, rfh);
+    auto it = std::ranges::find(children, rfh);
     // It is odd that this RenderFrameHost may not be a child of its parent, but
     // this is actually possible during teardown, hence the need for the check
     // for "it != children.end()".
@@ -294,6 +286,11 @@ FindRequestManager::ActivateNearestFindResultState::
 FindRequestManager::ActivateNearestFindResultState::
     ~ActivateNearestFindResultState() = default;
 
+int FindRequestManager::ActivateNearestFindResultState::GetNextID() {
+  static int next_id = 0;
+  return next_id++;
+}
+
 FindRequestManager::FrameRects::FrameRects() = default;
 FindRequestManager::FrameRects::FrameRects(const std::vector<gfx::RectF>& rects,
                                            int version)
@@ -312,34 +309,45 @@ FindRequestManager::FindRequestManager(WebContentsImpl* web_contents)
 
 FindRequestManager::~FindRequestManager() = default;
 
-void FindRequestManager::Find(int request_id,
-                              const std::u16string& search_text,
-                              blink::mojom::FindOptionsPtr options,
-                              bool skip_delay) {
+void FindRequestManager::Find(
+    const std::u16string& search_text,
+    blink::mojom::FindOptionsPtr options,
+    bool skip_delay,
+    base::FunctionRef<void(int request_id)> on_request_id) {
+  if (!skip_delay && !options->new_session &&
+      !delayed_find_task_.IsCancelled()) {
+    // If the user presses enter while we are waiting for a delayed find, then
+    // run the find now to improve responsiveness. This reuses the delayed
+    // request's own ID rather than allocating a new one for this call.
+    DCHECK_NE(delayed_request_id_, kInvalidId);
+    on_request_id(delayed_request_id_);
+    delayed_find_task_.callback().Run();
+    delayed_request_id_ = kInvalidId;
+    return;
+  }
+
   // Every find request must have a unique ID, and these IDs must strictly
   // increase so that newer requests always have greater IDs than older
   // requests.
+  const int request_id = ++last_request_id_;
   DCHECK_GT(request_id, current_request_.id);
   DCHECK_GT(request_id, current_session_id_);
+  on_request_id(request_id);
 
   if (skip_delay) {
     delayed_find_task_.Cancel();
+    delayed_request_id_ = kInvalidId;
     EmitFindRequest(request_id, search_text, std::move(options));
     return;
   }
 
   if (!options->new_session) {
-    // If the user presses enter while we are waiting for a delayed find, then
-    // run the find now to improve responsiveness.
-    if (!delayed_find_task_.IsCancelled()) {
-      delayed_find_task_.callback().Run();
-    } else {
-      EmitFindRequest(request_id, search_text, std::move(options));
-    }
+    EmitFindRequest(request_id, search_text, std::move(options));
     return;
   }
 
   if (search_text.length() < kMinKeystrokesWithoutDelay) {
+    delayed_request_id_ = request_id;
     delayed_find_task_.Reset(base::BindOnce(
         &FindRequestManager::EmitFindRequest, weak_factory_.GetWeakPtr(),
         request_id, search_text, std::move(options)));
@@ -350,6 +358,7 @@ void FindRequestManager::Find(int request_id,
 
   // If we aren't going to delay, then clear any previous attempts to delay.
   delayed_find_task_.Cancel();
+  delayed_request_id_ = kInvalidId;
 
   EmitFindRequest(request_id, search_text, std::move(options));
 }
@@ -370,7 +379,7 @@ void FindRequestManager::EmitFindRequest(int request_id,
 
 void FindRequestManager::ForEachAddedFindInPageRenderFrameHost(
     base::FunctionRef<void(RenderFrameHostImpl*)> func_ref) {
-  contents_->GetPrimaryMainFrame()->ForEachRenderFrameHost(
+  contents_->GetPrimaryMainFrame()->ForEachRenderFrameHostImpl(
       [this, func_ref](RenderFrameHostImpl* rfh) {
         if (!CheckFrame(rfh))
           return;
@@ -547,7 +556,7 @@ void FindRequestManager::RemoveFrame(RenderFrameHost* rfh) {
 
   // If no pending find replies are expected for the removed frame, then just
   // report the updated results.
-  if (!base::Contains(pending_initial_replies_, rfh) &&
+  if (!pending_initial_replies_.contains(rfh) &&
       pending_find_next_reply_ != rfh) {
     bool final_update =
         pending_initial_replies_.empty() && !pending_find_next_reply_;
@@ -598,7 +607,7 @@ void FindRequestManager::OnGetNearestFindResultReply(RenderFrameHostImpl* rfh,
                                                      int request_id,
                                                      float distance) {
   if (request_id != activate_.current_request_id ||
-      !base::Contains(activate_.pending_replies, rfh)) {
+      !activate_.pending_replies.contains(rfh)) {
     return;
   }
 
@@ -671,20 +680,30 @@ void FindRequestManager::FindInternal(const FindRequest& request) {
   DCHECK_GT(request.id, current_request_.id);
   DCHECK_GT(request.id, current_session_id_);
 
-  if (!request.options->new_session) {
-    // This is a find next operation.
-
-    // This implies that there is an ongoing find session with the same search
-    // text.
-    DCHECK_GE(current_session_id_, 0);
-    DCHECK_EQ(request.search_text, current_request_.search_text);
+  if (!request.options->new_session && current_session_id_ != kInvalidId &&
+      request.search_text == current_request_.search_text) {
+    // This is a find next operation continuing the session we are currently
+    // tracking (same search text as the request that started it).
 
     // The find next request will be directed at the focused frame if there is
     // one, or the first frame with matches otherwise.
-    RenderFrameHost* target_rfh =
-        contents_->GetFocusedWebContents()->GetFocusedFrame();
+    auto* focused_web_contents = contents_->GetFocusedWebContents();
+    RenderFrameHost* target_rfh = focused_web_contents
+                                      ? focused_web_contents->GetFocusedFrame()
+                                      : nullptr;
     if (!target_rfh || !CheckFrame(target_rfh))
       target_rfh = GetInitialFrame(request.options->forward);
+
+    // Verify that we have a valid frame before sending the request.
+    if (!target_rfh || !CheckFrame(target_rfh)) {
+      // No valid frame to send the find request to. Report this request as
+      // complete (with the current, unchanged results) so that callers of
+      // Find() are guaranteed a final reply for every request they issue,
+      // then advance the queue.
+      NotifyFindReply(request.id, /*final_update=*/true);
+      AdvanceQueue(request.id);
+      return;
+    }
 
     SendFindRequest(request, target_rfh);
     current_request_ = request;
@@ -692,14 +711,19 @@ void FindRequestManager::FindInternal(const FindRequest& request) {
     return;
   }
 
-  // This is an initial find operation.
+  // This is either an explicit new session, or a "find next" whose search
+  // text doesn't actually match the session we are currently tracking --
+  // e.g. another caller (DevTools, an extension, etc.) started a different
+  // find session on this WebContents in the meantime, and this caller's
+  // local notion of "same search as before" is stale. Treat it as a fresh
+  // session rather than assuming a guarantee the caller can no longer make.
   Reset(request);
 
   // Add and observe eligible RFHs in the WebContents. And, use
-  // ForEachRenderFrameHost instead of ForEachAddedFindInPageRenderFrameHost
+  // ForEachRenderFrameHostImpl instead of ForEachAddedFindInPageRenderFrameHost
   // because that calls CheckFrame() which will only be true if we've called
   // AddFrame() for the frame.
-  contents_->GetPrimaryMainFrame()->ForEachRenderFrameHost(
+  contents_->GetPrimaryMainFrame()->ForEachRenderFrameHostImpl(
       [this](RenderFrameHostImpl* rfh) {
         auto* wc = WebContents::FromRenderFrameHost(rfh);
         // Make sure each WebContents is only added once.
@@ -710,6 +734,15 @@ void FindRequestManager::FindInternal(const FindRequest& request) {
           return;
         AddFrame(rfh, false /* force */);
       });
+
+  // If no frame was actually eligible to be searched (e.g. none had a live
+  // renderer), no reply will ever come in from a renderer to complete this
+  // request. Report it as complete (with zero matches, per Reset() above)
+  // right away, so that callers of Find() are still guaranteed a final
+  // reply for every request they issue.
+  if (pending_initial_replies_.empty()) {
+    NotifyFindReply(request.id, /*final_update=*/true);
+  }
 }
 
 void FindRequestManager::AdvanceQueue(int request_id) {
@@ -777,7 +810,7 @@ RenderFrameHost* FindRequestManager::Traverse(RenderFrameHost* from_rfh,
   if (from_rfh_impl->IsPendingDeletion() ||
       from_rfh_impl->IsInBackForwardCache() ||
       from_rfh_impl->lifecycle_state() ==
-          RenderFrameHostImpl::LifecycleStateImpl::kPrerendering) {
+          RenderFrameHostLifecycleStateImpl::kPrerendering) {
     return nullptr;
   }
 
@@ -795,7 +828,7 @@ RenderFrameHost* FindRequestManager::Traverse(RenderFrameHost* from_rfh,
     RenderFrameHost* current_rfh = rfh;
     if (!matches_only ||
         find_in_page_clients_.find(current_rfh)->second->number_of_matches() ||
-        base::Contains(pending_initial_replies_, current_rfh)) {
+        pending_initial_replies_.contains(current_rfh)) {
       // Note that if there is still a pending reply expected for this frame,
       // then it may have unaccounted matches and will not be skipped via
       // |matches_only|.
@@ -832,7 +865,7 @@ void FindRequestManager::AddFrame(RenderFrameHost* rfh, bool force) {
 bool FindRequestManager::CheckFrame(RenderFrameHost* rfh) const {
   // TODO(crbug.com/40196212): Convert IsFindInPageDisabled to a DCHECK when we
   // replace DidFinishLoad with DidFinishNavigation in FrameObserver.
-  if (!rfh || !base::Contains(find_in_page_clients_, rfh) ||
+  if (!rfh || !find_in_page_clients_.contains(rfh) ||
       IsFindInPageDisabled(rfh)) {
     return false;
   }
@@ -887,9 +920,10 @@ void FindRequestManager::FinalUpdateReceived(int request_id,
     // next frame with matches after this one.
     target_rfh = Traverse(rfh, current_request_.options->forward,
                           true /* matches_only */, true /* wrap */);
-  } else if ((target_rfh =
+  } else if (contents_->GetFocusedWebContents() &&
+             (target_rfh =
                   contents_->GetFocusedWebContents()->GetFocusedFrame()) !=
-             nullptr) {
+                 nullptr) {
     // Otherwise, if there is a focused frame, then the active match will be in
     // the next frame with matches after that one.
     target_rfh = Traverse(target_rfh, current_request_.options->forward,

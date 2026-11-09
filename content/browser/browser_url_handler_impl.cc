@@ -6,8 +6,9 @@
 
 #include <stddef.h>
 
-#include "base/not_fatal_until.h"
-#include "base/ranges/algorithm.h"
+#include <algorithm>
+
+#include "base/check_is_test.h"
 #include "base/strings/string_util.h"
 #include "content/browser/renderer_host/debug_urls.h"
 #include "content/browser/webui/web_ui_impl.h"
@@ -106,8 +107,8 @@ void BrowserURLHandlerImpl::AddHandlerPair(URLHandler handler,
 void BrowserURLHandlerImpl::RewriteURLIfNecessary(
     GURL* url,
     BrowserContext* browser_context) {
-  DCHECK(url);
-  DCHECK(browser_context);
+  CHECK(url, base::NotFatalUntil::M159);
+  CHECK(browser_context, base::NotFatalUntil::M159);
   bool ignored_reverse_on_redirect;
   RewriteURLIfNecessary(url, browser_context, &ignored_reverse_on_redirect);
 }
@@ -133,9 +134,9 @@ void BrowserURLHandlerImpl::RewriteURLIfNecessary(
     GURL* url,
     BrowserContext* browser_context,
     bool* reverse_on_redirect) {
-  DCHECK(url);
-  DCHECK(browser_context);
-  DCHECK(reverse_on_redirect);
+  CHECK(url, base::NotFatalUntil::M159);
+  CHECK(browser_context, base::NotFatalUntil::M159);
+  CHECK(reverse_on_redirect, base::NotFatalUntil::M159);
 
   if (!url->is_valid()) {
     *reverse_on_redirect = false;
@@ -171,9 +172,10 @@ bool BrowserURLHandlerImpl::ReverseURLRewrite(
 }
 
 void BrowserURLHandlerImpl::RemoveHandlerForTesting(URLHandler handler) {
+  CHECK_IS_TEST();
   const auto it =
-      base::ranges::find(url_handlers_, handler, &HandlerPair::first);
-  CHECK(url_handlers_.end() != it, base::NotFatalUntil::M130);
+      std::ranges::find(url_handlers_, handler, &HandlerPair::first);
+  CHECK(url_handlers_.end() != it);
   url_handlers_.erase(it);
 }
 

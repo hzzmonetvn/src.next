@@ -5,6 +5,12 @@
 #include "chrome/browser/ui/android/toolbar/location_bar_model_android.h"
 
 #include "base/android/jni_string.h"
+#include "base/command_line.h"
+#include "base/feature_list.h"
+#include "base/metrics/field_trial_params.h"
+#include "chrome/browser/flags/android/chrome_feature_list.h"
+#include "chrome/browser/search/search.h"
+#include "chrome/common/chrome_switches.h"
 #include "chrome/common/url_constants.h"
 #include "chrome/common/webui_url_constants.h"
 #include "components/omnibox/browser/location_bar_model_impl.h"
@@ -13,78 +19,95 @@
 #include "content/public/browser/ssl_status.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/common/content_constants.h"
-#include "ui/base/device_form_factor.h"
 #include "url/android/gurl_android.h"
+#include "url/gurl.h"
 
-// Must come after all headers that specialize FromJniType() / ToJniType().
+// Must come after headers that provide symbols used by @JniType.
 #include "chrome/browser/ui/android/toolbar/jni_headers/LocationBarModel_jni.h"
 
-using base::android::JavaParamRef;
-using base::android::JavaRef;
-using base::android::ScopedJavaLocalRef;
+using jni_zero::JavaRef;
 
-LocationBarModelAndroid::LocationBarModelAndroid(JNIEnv* env,
-                                                 const JavaRef<jobject>& obj)
+namespace {
+
+bool IsShowDomainOnlyEnabled() {
+  return base::FeatureList::IsEnabled(chrome::android::kAndroidBottomBar) &&
+         chrome::android::kAndroidBottomBarShowDomainOnlyParam.Get();
+}
+
+}  // namespace
+
+LocationBarModelAndroid::LocationBarModelAndroid(const JavaRef<jobject>& obj)
     : location_bar_model_(
           std::make_unique<LocationBarModelImpl>(this,
                                                  content::kMaxURLDisplayChars)),
       java_object_(obj) {}
 
-LocationBarModelAndroid::~LocationBarModelAndroid() {}
+LocationBarModelAndroid::~LocationBarModelAndroid() = default;
 
-void LocationBarModelAndroid::Destroy(JNIEnv* env,
-                                      const JavaParamRef<jobject>& obj) {
+void LocationBarModelAndroid::Destroy() {
   delete this;
 }
 
-ScopedJavaLocalRef<jstring> LocationBarModelAndroid::GetFormattedFullURL(
-    JNIEnv* env,
-    const JavaParamRef<jobject>& obj) {
-  return base::android::ConvertUTF16ToJavaString(
-      env, location_bar_model_->GetFormattedFullURL());
+std::u16string LocationBarModelAndroid::GetFormattedFullURL() {
+  return location_bar_model_->GetFormattedFullURL();
 }
 
-ScopedJavaLocalRef<jstring> LocationBarModelAndroid::GetURLForDisplay(
-    JNIEnv* env,
-    const JavaParamRef<jobject>& obj) {
-  return base::android::ConvertUTF16ToJavaString(
-      env, location_bar_model_->GetURLForDisplay());
+std::u16string LocationBarModelAndroid::GetURLForDisplay() {
+  return location_bar_model_->GetURLForDisplay();
 }
 
-ScopedJavaLocalRef<jobject>
-LocationBarModelAndroid::GetUrlOfVisibleNavigationEntry(
-    JNIEnv* env,
-    const JavaParamRef<jobject>& obj) {
-  return url::GURLAndroid::FromNativeGURL(env, location_bar_model_->GetURL());
+GURL LocationBarModelAndroid::GetUrlOfVisibleNavigationEntry() {
+  return location_bar_model_->GetURL();
 }
 
-jint LocationBarModelAndroid::GetPageClassification(JNIEnv* env,
-                                                    bool is_prefetch) const {
+int32_t LocationBarModelAndroid::GetPageClassification(bool is_prefetch) const {
   return location_bar_model_->GetPageClassification(is_prefetch);
 }
 
 content::WebContents* LocationBarModelAndroid::GetActiveWebContents() const {
-  JNIEnv* env = base::android::AttachCurrentThread();
-  ScopedJavaLocalRef<jobject> jweb_contents =
-      Java_LocationBarModel_getActiveWebContents(env, java_object_);
-  return content::WebContents::FromJavaWebContents(jweb_contents);
+  JNIEnv* env = jni_zero::AttachCurrentThread();
+  return Java_LocationBarModel_getWebContents(env, java_object_);
 }
 
 bool LocationBarModelAndroid::IsNewTabPage() const {
   GURL url;
-  if (!GetURL(&url))
+  if (!GetURL(&url)) {
     return false;
+  }
 
   // Android Chrome has its own Instant NTP page implementation.
   if (url.SchemeIs(chrome::kChromeNativeScheme) &&
-      url.host_piece() == chrome::kChromeUINewTabHost) {
+      url.host() == chrome::kChromeUINewTabHost) {
+    return true;
+  }
+
+  // Desktop Android routes chrome://newtab to a WebUI NTP: the 1P NTP for
+  // Google, or the Chrome-owned fallback 3P NTP for non-Google DSEs that do
+  // not provide their own remote NTP.
+  if (search::IsWebUiNtpEnabledForDesktopAndroid() &&
+      url.SchemeIs(content::kChromeUIScheme) &&
+      (url.host() == chrome::kChromeUINewTabPageHost ||
+       url.host() == chrome::kChromeUINewTabPageThirdPartyHost)) {
     return true;
   }
 
   return false;
 }
 
-// static
-jlong JNI_LocationBarModel_Init(JNIEnv* env, const JavaParamRef<jobject>& obj) {
-  return reinterpret_cast<intptr_t>(new LocationBarModelAndroid(env, obj));
+bool LocationBarModelAndroid::ShouldTrimDisplayUrlAfterHostName() const {
+  GURL url;
+  return IsShowDomainOnlyEnabled() && GetURL(&url) &&
+         url.SchemeIsHTTPOrHTTPS() && IsToolbarUiRefactorEnabled();
 }
+
+bool LocationBarModelAndroid::IsToolbarUiRefactorEnabled() const {
+  JNIEnv* env = jni_zero::AttachCurrentThread();
+  return Java_LocationBarModel_isToolbarUiRefactorEnabled(env, java_object_);
+}
+
+// static
+static int64_t JNI_LocationBarModel_Init(const JavaRef<jobject>& obj) {
+  return reinterpret_cast<intptr_t>(new LocationBarModelAndroid(obj));
+}
+
+DEFINE_JNI(LocationBarModel)

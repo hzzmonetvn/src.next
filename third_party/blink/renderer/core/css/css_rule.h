@@ -31,6 +31,7 @@
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/heap/member.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+#include "third_party/blink/renderer/platform/wtf/wtf_size_t.h"
 
 namespace blink {
 
@@ -71,18 +72,29 @@ class CORE_EXPORT CSSRule : public ScriptWrappable {
 
     // Values for internal use, not web-exposed:
     kFirstInternalRule = 16,
-    kContainerRule = kFirstInternalRule,
+    // go/keep-sorted start
+    kApplyMixinRule = kFirstInternalRule,
+    kContainerRule,
+    kContentsMixinRule,
+    kCustomMediaRule,
     kFontFeatureRule,
     kFontPaletteValuesRule,
+    kFunctionDeclarationsRule,
+    kFunctionRule,
     kLayerBlockRule,
     kLayerStatementRule,
+    kLocationRule,
+    kMixinRule,
+    kNavigationRule,
     kNestedDeclarationsRule,
     kPositionTryRule,
+    kPrivateRule,
     kPropertyRule,
+    kResultRule,
     kScopeRule,
     kStartingStyleRule,
     kViewTransitionRule,
-    // Lexicographical order above.
+    // go/keep-sorted end
   };
 
   virtual Type GetType() const = 0;
@@ -116,6 +128,10 @@ class CORE_EXPORT CSSRule : public ScriptWrappable {
     return parent_is_rule_ ? ParentAsCSSRule() : nullptr;
   }
 
+  CSSRule* RootCSSRule() {
+    return parentRule() ? parentRule()->RootCSSRule() : this;
+  }
+
   // The CSSOM spec states that "setting the cssText attribute must do nothing."
   void setCSSText(const String&) {}
 
@@ -131,23 +147,28 @@ class CORE_EXPORT CSSRule : public ScriptWrappable {
 
   void CountUse(WebFeature) const;
 
- private:
-  bool VerifyParentIsCSSRule() const;
-  bool VerifyParentIsCSSStyleSheet() const;
+  // Replaces a StyleRuleBase in the child vector of the parent.
+  // The "parent" may be another rule, a stylesheet, or null (if the
+  // rule tree has been detached from the stylesheet).
+  //
+  // See StyleSheetContents::ReplaceRuleIfExists() for an explanation
+  // of `position_hint` and the return value.
+  wtf_size_t ReplaceChildRuleInParentIfExists(StyleRuleBase* old_rule,
+                                              StyleRuleBase* new_rule,
+                                              wtf_size_t position_hint);
 
+ private:
   CSSRule* ParentAsCSSRule() const {
     DCHECK(parent_is_rule_);
-    DCHECK(VerifyParentIsCSSRule());
     return reinterpret_cast<CSSRule*>(parent_.Get());
   }
   CSSStyleSheet* ParentAsCSSStyleSheet() const {
     DCHECK(!parent_is_rule_);
-    DCHECK(VerifyParentIsCSSStyleSheet());
     return reinterpret_cast<CSSStyleSheet*>(parent_.Get());
   }
 
-  mutable unsigned char has_cached_selector_text_ : 1;
-  unsigned char parent_is_rule_ : 1;
+  mutable bool has_cached_selector_text_ : 1;
+  bool parent_is_rule_ : 1;
 
   // parent_ should reference either CSSRule or CSSStyleSheet (both are
   // descendants of ScriptWrappable). This field should only be accessed
