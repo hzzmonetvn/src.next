@@ -1,0 +1,45 @@
+name: Kiwi port runner preflight
+
+on:
+  push:
+    branches: [port/kiwi-chromium-157]
+    paths:
+      - .github/workflows/kiwi-port-preflight.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  resources:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Measure available build resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf '# Chromium Android runner preflight\n\n'
+            printf 'Chromium target: 157.0.8103.50; Android arm64.\n\n'
+            printf '## CPU\n```\n'
+            lscpu
+            printf '\n```\n## Memory\n```\n'
+            free -h
+            printf '\n```\n## Disk\n```\n'
+            df -hT
+            printf '\n```\n'
+          } | tee "$RUNNER_TEMP/preflight.md" >> "$GITHUB_STEP_SUMMARY"
+          available=$(df -B1 --output=avail "$GITHUB_WORKSPACE" | tr -cd '0-9')
+          memory=$(awk '/MemTotal:/ {print $2}' /proc/meminfo)
+          if (( available < 100 * 1024 * 1024 * 1024 || memory < 8 * 1024 * 1024 )); then
+            echo 'Runner below Chromium documented minimum: 100 GiB free disk and 8 GiB RAM.' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+      - name: Preserve resource report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-preflight
+          path: ${{ runner.temp }}/preflight.md
+          if-no-files-found: error
