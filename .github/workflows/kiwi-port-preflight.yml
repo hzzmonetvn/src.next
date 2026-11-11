@@ -28,6 +28,12 @@ jobs:
             free -h
             printf '\n```\n## Disk\n```\n'
             df -hT
+            printf '\n```\n## Optional preinstalled toolchains\n```\n'
+            for directory in /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache; do
+              if [ -d "$directory" ]; then
+                du -sh "$directory"
+              fi
+            done
             printf '\n```\n'
           } | tee "$RUNNER_TEMP/preflight.md" >> "$GITHUB_STEP_SUMMARY"
           available=$(df -B1 --output=avail "$GITHUB_WORKSPACE" | tr -cd '0-9')
