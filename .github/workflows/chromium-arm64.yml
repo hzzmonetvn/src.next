@@ -1,0 +1,94 @@
+name: Chromium arm64 port baseline
+
+on:
+  push:
+    branches: [port/kiwi-chromium-157]
+    paths:
+      - .github/workflows/chromium-arm64.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chromium-arm64-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      CHROMIUM_VERSION: 157.0.8103.50
+      DEPOT_TOOLS_UPDATE: '0'
+    steps:
+      - name: Prepare disposable runner disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Recovery: rerun this job for a fresh runner image.
+          for directory in /usr/share/dotnet /usr/local/lib/android /usr/local/.ghcup /opt/hostedtoolcache; do
+            if [ -d "$directory" ]; then
+              du -sh "$directory"
+              sudo rm -rf -- "$directory"
+            fi
+          done
+          df -h
+          free -h
+          available=$(df -B1 --output=avail "$GITHUB_WORKSPACE" | tr -cd '0-9')
+          (( available >= 100 * 1024 * 1024 * 1024 ))
+      - name: Fetch build tools
+        run: |
+          set -euo pipefail
+          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$RUNNER_TEMP/depot_tools"
+          echo "$RUNNER_TEMP/depot_tools" >> "$GITHUB_PATH"
+          git -C "$RUNNER_TEMP/depot_tools" rev-parse HEAD | tee "$RUNNER_TEMP/depot-tools-revision.txt"
+      - name: Fetch complete pinned Chromium source
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/chromium"
+          cd "$GITHUB_WORKSPACE/chromium"
+          gclient config --name=src https://chromium.googlesource.com/chromium/src.git
+          printf '\ntarget_os = ["android"]\n' >> .gclient
+          gclient sync --no-history --nohooks --shallow --revision "src@$CHROMIUM_VERSION" -j 4 2>&1 | tee "$RUNNER_TEMP/sync.log"
+          git -C src rev-parse HEAD | tee "$RUNNER_TEMP/chromium-revision.txt"
+          actual=$(paste -sd. src/chrome/VERSION | sed -E 's/[A-Z]+=//g')
+          test "$actual" = "$CHROMIUM_VERSION"
+          df -h
+      - name: Install Chromium build dependencies
+        working-directory: chromium/src
+        run: sudo ./build/install-build-deps.sh --no-prompt
+      - name: Fetch pinned toolchains and generate hooks
+        working-directory: chromium
+        run: |
+          set -euo pipefail
+          gclient runhooks 2>&1 | tee "$RUNNER_TEMP/hooks.log"
+          df -h
+      - name: Generate baseline arm64 build
+        working-directory: chromium/src
+        run: |
+          set -euo pipefail
+          gn gen out/Arm64 --args='target_os="android" target_cpu="arm64" is_debug=false is_component_build=false symbol_level=0 blink_symbol_level=0 v8_symbol_level=0 use_remoteexec=false is_official_build=false treat_warnings_as_errors=false' 2>&1 | tee "$RUNNER_TEMP/gn.log"
+      - name: Compile baseline APK on GitHub only
+        working-directory: chromium/src
+        run: |
+          set -euo pipefail
+          autoninja -C out/Arm64 -j 2 chrome_public_apk 2>&1 | tee "$RUNNER_TEMP/build.log"
+      - name: Upload baseline APK, not yet a Kiwi port
+        uses: actions/upload-artifact@v4
+        with:
+          name: chromium-157.0.8103.50-arm64-baseline
+          path: chromium/src/out/Arm64/apks/ChromePublic.apk
+          if-no-files-found: error
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chromium-arm64-diagnostics
+          path: |
+            ${{ runner.temp }}/*-revision.txt
+            ${{ runner.temp }}/sync.log
+            ${{ runner.temp }}/hooks.log
+            ${{ runner.temp }}/gn.log
+            ${{ runner.temp }}/build.log
+          if-no-files-found: warn
