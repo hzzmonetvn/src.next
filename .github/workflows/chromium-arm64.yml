@@ -43,6 +43,8 @@ jobs:
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$RUNNER_TEMP/depot_tools"
           echo "$RUNNER_TEMP/depot_tools" >> "$GITHUB_PATH"
           git -C "$RUNNER_TEMP/depot_tools" rev-parse HEAD | tee "$RUNNER_TEMP/depot-tools-revision.txt"
+          "$RUNNER_TEMP/depot_tools/ensure_bootstrap"
+          test -s "$RUNNER_TEMP/depot_tools/python3_bin_reldir.txt"
       - name: Fetch complete pinned Chromium source
         run: |
           set -euo pipefail
