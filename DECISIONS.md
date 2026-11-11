@@ -21,6 +21,13 @@ Considered: immediately invoking the old APK workflows. Rejected because they ca
 
 PR #1 is an earlier partial Chromium import, not an integrated Kiwi build. A complete checkout at the pinned upstream revision, dependency sync, reviewed Kiwi patches, and actual compilation are required. No APK or feature validation has been completed at this stage.
 
+## Initial evidence
+
+- First runner: 4 vCPU, 15 GiB RAM, 86 GiB free disk; failed the preflight disk threshold.
+- Diagnostic run measured optional toolchains: dotnet 5.8 GiB, Android SDK 12 GiB, ghcup 3.7 GiB, hostedtoolcache 5.3 GiB. Remove only those disposable runner directories before remeasurement. Recovery is a fresh job runner; no local machine cleanup occurs.
+- Original Kiwi base is b2a61e552c940b89d2ae504de720832780f4e7ea (105.0.5195.24). Its endpoint delta to origin/kiwi has 577 files, 13,810 insertions, 834 deletions. The similarly labelled 7011172b snapshot is not the correct ancestry baseline.
+- Adblock menu/settings wiring is present, but complete filter-engine/list-update behavior remains unverified. Chromium 157 extension build flags differ from 105; setting enable_extensions alone is not a port.
+
 ## Verification still required
 
 - Runner resource preflight.

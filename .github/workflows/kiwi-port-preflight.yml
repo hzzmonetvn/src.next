@@ -15,6 +15,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
+      - name: Reclaim unrelated preinstalled toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Only disposable runner software; Chromium fetches its pinned toolchain.
+          # Recovery: rerun the job to provision a fresh runner image.
+          for directory in /usr/share/dotnet /usr/local/lib/android /usr/local/.ghcup /opt/hostedtoolcache; do
+            if [ -d "$directory" ]; then
+              du -sh "$directory"
+              sudo rm -rf -- "$directory"
+            fi
+          done
       - name: Measure available build resources
         shell: bash
         run: |
