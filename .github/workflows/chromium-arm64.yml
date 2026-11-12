@@ -83,6 +83,7 @@ jobs:
         id: compile
         working-directory: chromium/src
         run: |
+          set +e
           set -uo pipefail
           timeout --signal=INT --kill-after=120s 270m autoninja -C out/Arm64 -j 4 chrome_public_apk 2>&1 | tee "$RUNNER_TEMP/build.log"
           result=${PIPESTATUS[0]}
