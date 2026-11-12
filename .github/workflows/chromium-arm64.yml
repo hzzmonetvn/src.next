@@ -66,22 +66,51 @@ jobs:
           set -euo pipefail
           gclient runhooks 2>&1 | tee "$RUNNER_TEMP/hooks.log"
           df -h
+      - name: Restore incremental arm64 build
+        id: build-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: chromium/src/out/Arm64
+          key: chromium-157.0.8103.50-arm64-out-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            chromium-157.0.8103.50-arm64-out-v1-
       - name: Generate baseline arm64 build
         working-directory: chromium/src
         run: |
           set -euo pipefail
           gn gen out/Arm64 --args='target_os="android" target_cpu="arm64" is_debug=false is_component_build=false symbol_level=0 blink_symbol_level=0 v8_symbol_level=0 use_remoteexec=false is_official_build=false treat_warnings_as_errors=false' 2>&1 | tee "$RUNNER_TEMP/gn.log"
       - name: Compile baseline APK on GitHub only
+        id: compile
         working-directory: chromium/src
         run: |
-          set -euo pipefail
-          autoninja -C out/Arm64 -j 2 chrome_public_apk 2>&1 | tee "$RUNNER_TEMP/build.log"
+          set -uo pipefail
+          timeout --signal=INT --kill-after=120s 270m autoninja -C out/Arm64 -j 4 chrome_public_apk 2>&1 | tee "$RUNNER_TEMP/build.log"
+          result=${PIPESTATUS[0]}
+          echo "result=$result" >> "$GITHUB_OUTPUT"
+          du -sh out/Arm64 | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$result" = 124 ]; then
+            echo 'Compile time slice ended; saving incremental output for the next run.' >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$result" != 0 ]; then
+            exit "$result"
+          fi
+      - name: Save incremental arm64 build
+        if: always() && steps.compile.outputs.result != ''
+        uses: actions/cache/save@v4
+        with:
+          path: chromium/src/out/Arm64
+          key: ${{ steps.build-cache.outputs.cache-primary-key }}
       - name: Upload baseline APK, not yet a Kiwi port
+        if: steps.compile.outputs.result == '0'
         uses: actions/upload-artifact@v4
         with:
           name: chromium-157.0.8103.50-arm64-baseline
           path: chromium/src/out/Arm64/apks/ChromePublic.apk
           if-no-files-found: error
+      - name: Mark incomplete compilation explicitly
+        if: steps.compile.outputs.result == '124'
+        run: |
+          echo '::error::Compilation checkpoint saved; APK is not complete. Rerun this workflow to restore the latest cache.'
+          exit 1
       - name: Upload diagnostic logs
         if: always()
         uses: actions/upload-artifact@v4
