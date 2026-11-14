@@ -21,6 +21,12 @@ Considered: immediately invoking the old APK workflows. Rejected because they ca
 
 PR #1 is an earlier partial Chromium import, not an integrated Kiwi build. A complete checkout at the pinned upstream revision, dependency sync, reviewed Kiwi patches, and actual compilation are required. No APK or feature validation has been completed at this stage.
 
+### Pre-build disk cleanup (2026-11-14)
+
+Keep the initial disposable-runner SDK cleanup and add APT download/list cleanup after dependency installation and hooks, before build-cache restoration. Log available space before and after. Installed packages, Chromium source, pinned toolchains, and incremental output remain intact. APT lists can be restored with apt-get update; a fresh job restores the runner image.
+
+Rejected: deleting checkout metadata, output caches, or disabling swap to gain space. Those changes would interfere with incremental build diagnosis or reduce memory headroom. This cleanup does not fix the previously observed rebuild/cache invalidation issue.
+
 ## Initial evidence
 
 - First runner: 4 vCPU, 15 GiB RAM, 86 GiB free disk; failed the preflight disk threshold.

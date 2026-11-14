@@ -27,6 +27,8 @@ jobs:
         run: |
           set -euo pipefail
           # Recovery: rerun this job for a fresh runner image.
+          echo 'Disk before cleanup:'
+          df -h "$GITHUB_WORKSPACE"
           for directory in /usr/share/dotnet /usr/local/lib/android /usr/local/.ghcup /opt/hostedtoolcache; do
             if [ -d "$directory" ]; then
               du -sh "$directory"
@@ -66,6 +68,18 @@ jobs:
           set -euo pipefail
           gclient runhooks 2>&1 | tee "$RUNNER_TEMP/hooks.log"
           df -h
+      - name: Clean package downloads before build
+        shell: bash
+        run: |
+          set -euo pipefail
+          before=$(df -B1 --output=avail "$GITHUB_WORKSPACE" | tr -cd '0-9')
+          df -h "$GITHUB_WORKSPACE"
+          # Packages remain installed; APT can download these caches again.
+          sudo apt-get clean
+          sudo rm -rf -- /var/lib/apt/lists/*
+          after=$(df -B1 --output=avail "$GITHUB_WORKSPACE" | tr -cd '0-9')
+          df -h "$GITHUB_WORKSPACE"
+          printf 'Pre-build APT cleanup reclaimed %s bytes; %s bytes available before build-cache restore.\n' "$((after - before))" "$after" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Restore incremental arm64 build
         id: build-cache
         uses: actions/cache/restore@v4
